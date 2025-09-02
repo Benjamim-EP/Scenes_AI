@@ -1,0 +1,48 @@
+body, html {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif;
+}
+.splash-container {
+    width: 100%; height: 100%; position: relative;
+}
+.background-video {
+    position: absolute; top: 50%; left: 50%;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    transform: translate(-50%, -50%);
+    z-index: -1;
+    filter: brightness(0.4);
+}
+.main-content {
+    width: 100%; height: 100%;
+    display: flex; flex-direction: column;
+    justify-content: center; align-items: center;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(5px);
+}
+.art-container {
+    text-align: center;
+    margin-bottom: 30px;
+}
+.title {
+    color: white; font-size: 5em; font-weight: 900;
+    text-shadow: 3px 3px 10px rgba(0, 0, 0, 0.9);
+    margin: 0; letter-spacing: 2px;
+}
+.buttons-container {
+    display: flex; flex-wrap: wrap; justify-content: center;
+    gap: 15px; max-width: 80%;
+}
+.actress-btn {
+    background-color: rgba(187, 134, 252, 0.8);
+    color: #fff; border: 1px solid rgba(255, 255, 255, 0.5);
+    padding: 15px 30px; font-size: 1.1em; font-weight: bold;
+    border-radius: 8px; cursor: pointer;
+    transition: transform 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+}
+.actress-btn:hover {
+    transform: scale(1.05);
+    background-color: #bb86fc;
+    box-shadow: 0 0 15px rgba(187, 134, 252, 0.7);
+}
+.loading-text { color: #fff; font-size: 1.2em; }

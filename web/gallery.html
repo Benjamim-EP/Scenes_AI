@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>Galeria de Cenas</title>
+    <!-- Link para o CSS da galeria -->
+    <link rel="stylesheet" href="style.css">
+    <script type="text/javascript" src="/eel.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>Galeria de Cenas</h1>
+
+        <!-- Barra de Busca -->
+        <div class="search-bar">
+            <input type="search" id="search-input" placeholder="Busque por tags..." autocomplete="off">
+            <div id="autocomplete-list" class="autocomplete-items"></div>
+            <button id="search-button">Buscar</button>
+            <button id="clear-button" style="display: none;">Limpar Busca</button>
+        </div>
+
+        <!-- A Galeria de Vídeos -->
+        <div id="video-gallery" class="gallery-container">
+            <!-- Os vídeos serão inseridos aqui pelo script.js -->
+        </div>
+
+        <!-- Controles de Paginação -->
+        <div id="pagination-controls" class="pagination">
+            <button id="prev-button">Anterior</button>
+            <span id="page-info">Página 1 de 1</span>
+            <button id="next-button">Próximo</button>
+        </div>
+    </div>
+    <!-- Link para o JavaScript da galeria -->
+    <script type="text/javascript" src="script.js"></script>
+</body>
+</html> 

@@ -1,0 +1,912 @@
+#.\app.py
+
+import eel
+import sqlite3
+import os
+import json
+
+# ==============================================================================
+# --- CONFIGURAÇÃO ---
+# ==============================================================================
+DB_FILE = "cenas_database.db"
+PAGE_SIZE = 20
+TAGS_FILE = "tags.txt"
+
+ALLOWED_TAGS = set()
+def load_allowed_tags():
+    """Lê o arquivo tags.txt e o carrega em um set para busca rápida."""
+    global ALLOWED_TAGS
+    if not os.path.exists(TAGS_FILE):
+        print(f"AVISO: '{TAGS_FILE}' não encontrado. Todas as tags serão exibidas.")
+        return
+        
+    try:
+        with open(TAGS_FILE, 'r', encoding='utf-8') as f:
+            ALLOWED_TAGS = {line.strip() for line in f if line.strip()}
+        print(f"Carregadas {len(ALLOWED_TAGS)} tags permitidas de '{TAGS_FILE}'.")
+    except Exception as e:
+        print(f"ERRO ao ler '{TAGS_FILE}': {e}")
+
+# ==============================================================================
+# --- FUNÇÕES EXPOSTAS PARA O JAVASCRIPT ---
+# ==============================================================================
+
+@eel.expose
+def get_all_actresses():
+    """Busca uma lista única de todas as atrizes no banco de dados para a tela inicial."""
+    if not os.path.exists(DB_FILE): return []
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # Pega um vídeo por atriz para usar como 'arte de fundo' na tela inicial
+    query = """
+    SELECT actress, file_path
+    FROM videos
+    WHERE actress IS NOT NULL AND actress != ''
+    GROUP BY actress
+    ORDER BY actress
+    """
+    cursor.execute(query)
+    actresses = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    # Corrige os caminhos para o formato de URL
+    for actress in actresses:
+        if actress['file_path']:
+            actress['file_path'] = actress['file_path'].replace(os.path.sep, '/')
+
+    return actresses
+
+@eel.expose
+def get_videos_page(actress_name, page_number=1):
+    """Busca uma 'página' de vídeos para uma atriz específica."""
+    conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+    
+    cursor.execute("SELECT COUNT(*) FROM videos WHERE actress = ?", (actress_name,))
+    total_videos = cursor.fetchone()[0]
+    total_pages = (total_videos + PAGE_SIZE - 1) // PAGE_SIZE; offset = (page_number - 1) * PAGE_SIZE
+    
+    query = """
+    SELECT v.video_id, v.video_name, v.file_path,
+           (SELECT GROUP_CONCAT(DISTINCT t.tag_name || ':' || printf("%.2f", top_tags.avg_score))
+            FROM (SELECT st.tag_id, AVG(st.score) as avg_score FROM scenes s JOIN scene_tags st ON s.scene_id = st.scene_id WHERE s.video_id = v.video_id GROUP BY st.tag_id ORDER BY avg_score DESC) AS top_tags
+            JOIN tags t ON top_tags.tag_id = t.tag_id) AS all_tags_with_scores
+    FROM videos v WHERE v.actress = ? ORDER BY v.video_name LIMIT ? OFFSET ?
+    """
+    cursor.execute(query, (actress_name, PAGE_SIZE, offset)); videos_raw = [dict(row) for row in cursor.fetchall()]; conn.close()
+    
+    for video in videos_raw:
+        video['main_tags'] = video.pop('all_tags_with_scores')
+        if video['main_tags'] and ALLOWED_TAGS:
+            video_tags_with_scores = video['main_tags'].split(',')
+            filtered_tags = [item for item in video_tags_with_scores if item.split(':')[0] in ALLOWED_TAGS]
+            video['main_tags'] = ",".join(filtered_tags)
+        if video['file_path']:
+            video['file_path'] = video['file_path'].replace(os.path.sep, '/')
+    
+    return { "videos": videos_raw, "currentPage": page_number, "totalPages": total_pages }
+
+@eel.expose
+def search_videos_by_tags(actress_name, search_query):
+    """Busca vídeos de uma atriz específica que correspondem a uma query de tags."""
+    conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+
+    tokens = search_query.lower().strip().split()
+    positive_tags = [token for token in tokens if not token.startswith('-')]
+    negative_tags = [token[1:] for token in tokens if token.startswith('-')]
+
+    if not positive_tags:
+        return {"videos": [], "search_query": search_query}
+
+    main_search_tag = positive_tags[0]
+    
+    base_query = """
+    SELECT v.video_id, v.video_name, v.file_path,
+           AVG(CASE WHEN t.tag_name = ? THEN st.score ELSE NULL END) as relevance_score,
+           GROUP_CONCAT(DISTINCT t.tag_name || ':' || printf("%.2f", st_avg.avg_score)) as main_tags
+    FROM videos v
+    JOIN scenes s ON v.video_id = s.video_id
+    JOIN scene_tags st ON s.scene_id = st.scene_id
+    JOIN tags t ON st.tag_id = t.tag_id
+    JOIN (
+        SELECT s_inner.video_id, st_inner.tag_id, AVG(st_inner.score) as avg_score
+        FROM scenes s_inner JOIN scene_tags st_inner ON s_inner.scene_id = st_inner.scene_id
+        GROUP BY s_inner.video_id, st_inner.tag_id
+    ) st_avg ON v.video_id = st_avg.video_id AND st.tag_id = st_avg.tag_id
+    WHERE v.actress = ? AND v.video_id IN (
+    """
+    
+    for i, tag in enumerate(positive_tags):
+        base_query += f"SELECT s.video_id FROM scenes s JOIN scene_tags st ON s.scene_id = st.scene_id JOIN tags t ON st.tag_id = t.tag_id WHERE t.tag_name = ?"
+        if i < len(positive_tags) - 1: base_query += " INTERSECT "
+
+    if negative_tags:
+        base_query += " EXCEPT SELECT s.video_id FROM scenes s JOIN scene_tags st ON s.scene_id = st.scene_id JOIN tags t ON st.tag_id = t.tag_id WHERE t.tag_name IN ("
+        base_query += ", ".join(["?"] * len(negative_tags)) + ")"
+
+    base_query += ") GROUP BY v.video_id ORDER BY relevance_score DESC"
+
+    params = [main_search_tag, actress_name] + positive_tags + negative_tags
+    cursor.execute(base_query, params)
+    
+    videos_raw = [dict(row) for row in cursor.fetchall()]; conn.close()
+
+    for video in videos_raw:
+        if video['main_tags'] and ALLOWED_TAGS:
+            video_tags_with_scores = video['main_tags'].split(',')
+            filtered_tags = [item for item in video_tags_with_scores if item.split(':')[0] in ALLOWED_TAGS]
+            video['main_tags'] = ",".join(filtered_tags)
+        if video['file_path']: video['file_path'] = video['file_path'].replace(os.path.sep, '/')
+
+    return {"videos": videos_raw, "search_query": search_query, "highlight_tag": main_search_tag}
+
+@eel.expose
+def get_scenes_for_video(video_id):
+    """Busca as cenas e suas tags para um vídeo específico."""
+    conn = sqlite3.connect(DB_FILE); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+    query = """
+    SELECT s.scene_id, s.start_time, s.end_time, GROUP_CONCAT(t.tag_name) as tags
+    FROM scenes s
+    LEFT JOIN scene_tags st ON s.scene_id = st.scene_id
+    LEFT JOIN tags t ON st.tag_id = t.tag_id
+    WHERE s.video_id = ?
+    GROUP BY s.scene_id ORDER BY s.start_time
+    """
+    cursor.execute(query, (video_id,)); scenes = [dict(row) for row in cursor.fetchall()]; conn.close()
+    return scenes
+
+@eel.expose
+def get_all_tags_for_autocomplete():
+    """Retorna a lista de tags permitidas para o autocomplete."""
+    return json.dumps(sorted(list(ALLOWED_TAGS)))
+
+# ==============================================================================
+# --- INICIALIZAÇÃO DA APLICAÇÃO ---
+# ==============================================================================
+if __name__ == "__main__":
+    load_allowed_tags()
+    # A raiz é a pasta principal do projeto, para acessar 'web' e 'tags.txt'
+    eel.init('.')
+    
+    print("Iniciando 'Pulser Edits'...")
+    print("Se a janela não abrir, acesse http://localhost:8000/home.html no seu navegador.")
+    
+    try:
+        # A página inicial agora é a 'home.html' dentro da pasta 'web'
+        eel.start('web/home.html', size=(1280, 800))
+    except Exception as e:
+        print(f"ERRO ao iniciar o Eel. Verifique se o Chrome/Edge está instalado. Erro: {e}")
+
+--------
+
+#.\concatenar.py
+
+import os
+
+# extensões que você quer juntar
+EXTENSOES = {".hml", ".py", ".js", ".css"}
+
+# pasta base (troque se precisar)
+PASTA_BASE = "."
+
+# arquivo final
+ARQUIVO_SAIDA = "arquivos_concatenados.txt"
+
+
+def concatenar_arquivos(pasta_base, arquivo_saida):
+    with open(arquivo_saida, "w", encoding="utf-8") as saida:
+        for root, _, files in os.walk(pasta_base):
+            for file in files:
+                _, ext = os.path.splitext(file)
+                if ext.lower() in EXTENSOES:
+                    caminho = os.path.join(root, file)
+
+                    # escreve cabeçalho com caminho
+                    saida.write(f"#{caminho}\n\n")
+
+                    try:
+                        with open(caminho, "r", encoding="utf-8", errors="ignore") as f:
+                            conteudo = f.read()
+                            saida.write(conteudo.strip())
+                    except Exception as e:
+                        saida.write(f"## Erro ao ler {caminho}: {e}")
+
+                    # separador
+                    saida.write("\n\n--------\n\n")
+
+
+if __name__ == "__main__":
+    concatenar_arquivos(PASTA_BASE, ARQUIVO_SAIDA)
+    print(f"Concatenação concluída! Arquivo salvo em: {ARQUIVO_SAIDA}")
+
+--------
+
+#.\construir_banco_de_cenas.py
+
+import os
+import sqlite3
+import json
+from tqdm import tqdm
+
+# ==============================================================================
+# --- CONFIGURAÇÃO ---
+# ==============================================================================
+
+# [SIMPLIFICADO] Pasta raiz DENTRO de 'web' que contém as subpastas de cada atriz.
+# É aqui que estão tanto os VÍDEOS quanto os JSONS.
+DATA_ROOT_FOLDER = os.path.join("web", "videos")
+
+# O arquivo de banco de dados a ser criado/recriado.
+DB_FILE = "cenas_database.db"
+
+# ==============================================================================
+# --- FUNÇÕES ---
+# ==============================================================================
+
+def setup_database(db_path):
+    if os.path.exists(db_path):
+        print(f"Deletando banco de dados antigo: {db_path}")
+        os.remove(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA foreign_keys = ON;")
+    
+    cursor.execute("""
+    CREATE TABLE videos (
+        video_id INTEGER PRIMARY KEY,
+        video_name TEXT NOT NULL UNIQUE,
+        actress TEXT,
+        file_path TEXT
+    )""")
+    
+    cursor.execute("CREATE TABLE scenes (scene_id INTEGER PRIMARY KEY, video_id INTEGER NOT NULL, scene_number INTEGER NOT NULL, start_time REAL NOT NULL, end_time REAL NOT NULL, duration REAL NOT NULL, FOREIGN KEY (video_id) REFERENCES videos(video_id))")
+    cursor.execute("CREATE TABLE tags (tag_id INTEGER PRIMARY KEY, tag_name TEXT NOT NULL UNIQUE)")
+    cursor.execute("CREATE TABLE scene_tags (scene_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, score REAL NOT NULL, PRIMARY KEY (scene_id, tag_id), FOREIGN KEY (scene_id) REFERENCES scenes(scene_id) ON DELETE CASCADE, FOREIGN KEY (tag_id) REFERENCES tags(tag_id))")
+    
+    conn.commit()
+    print("Nova estrutura de banco de dados criada com a coluna 'actress'.")
+    return conn
+
+def build_scene_database():
+    conn = setup_database(DB_FILE)
+    cursor = conn.cursor()
+
+    try:
+        actress_folders = [d for d in os.listdir(DATA_ROOT_FOLDER) if os.path.isdir(os.path.join(DATA_ROOT_FOLDER, d))]
+    except FileNotFoundError:
+        print(f"ERRO: A pasta raiz de dados '{DATA_ROOT_FOLDER}' não foi encontrada.")
+        return
+
+    if not actress_folders:
+        print(f"Nenhuma pasta de atriz encontrada em '{DATA_ROOT_FOLDER}'.")
+        return
+
+    print(f"Encontradas {len(actress_folders)} pastas de atrizes para processar.")
+
+    video_extensions = ('.mp4', '.mkv', '.mov', '.webm', '.avi', '.wmv', '.mpg')
+
+    # Itera sobre cada pasta de atriz
+    for actress_name in tqdm(actress_folders, desc="Processando Atrizes"):
+        actress_folder_path = os.path.join(DATA_ROOT_FOLDER, actress_name)
+        
+        # [SIMPLIFICADO] Itera sobre os ARQUIVOS DE VÍDEO diretamente
+        video_files = [f for f in os.listdir(actress_folder_path) if f.lower().endswith(video_extensions)]
+
+        for video_filename in tqdm(video_files, desc=f"  Vídeos de {actress_name}", leave=False):
+            base_video_name, _ = os.path.splitext(video_filename)
+            
+            # Verifica se o JSON correspondente existe
+            json_filename = f"{base_video_name}_cenas.json"
+            json_path = os.path.join(actress_folder_path, json_filename)
+            if not os.path.exists(json_path):
+                tqdm.write(f"  Aviso: JSON '{json_filename}' não encontrado para o vídeo. Pulando.")
+                continue
+
+            # Cria o caminho relativo para o servidor web (a partir da raiz do projeto)
+            path_to_save_in_db = os.path.join("web", "videos", actress_name, video_filename)
+            path_to_save_in_db = path_to_save_in_db.replace(os.path.sep, '/')
+
+            # Insere o vídeo e o nome da atriz no banco de dados
+            cursor.execute("INSERT OR IGNORE INTO videos (video_name, actress, file_path) VALUES (?, ?, ?)", 
+                           (base_video_name, actress_name, path_to_save_in_db))
+            
+            cursor.execute("SELECT video_id FROM videos WHERE video_name = ?", (base_video_name,))
+            video_id = cursor.fetchone()[0]
+            
+            with open(json_path, 'r', encoding='utf-8') as f:
+                try:
+                    scenes_data = json.load(f)
+                except json.JSONDecodeError:
+                    tqdm.write(f"  ERRO: JSON '{json_filename}' mal formatado. Pulando.")
+                    continue
+
+            for scene in scenes_data:
+                cursor.execute("INSERT INTO scenes (video_id, scene_number, start_time, end_time, duration) VALUES (?, ?, ?, ?, ?)", (video_id, scene.get('cena_n'), scene.get('start_time'), scene.get('end_time'), scene.get('duration')))
+                scene_id = cursor.lastrowid
+                for tag_name, score in scene.get('tags_principais', {}).items():
+                    cursor.execute("INSERT OR IGNORE INTO tags (tag_name) VALUES (?)", (tag_name,))
+                    cursor.execute("SELECT tag_id FROM tags WHERE tag_name = ?", (tag_name,))
+                    tag_id_result = cursor.fetchone()
+                    if tag_id_result:
+                        tag_id = tag_id_result[0]
+                        cursor.execute("INSERT INTO scene_tags (scene_id, tag_id, score) VALUES (?, ?, ?)", (scene_id, tag_id, score))
+    
+    conn.commit()
+    conn.close()
+    print("\nBanco de dados reconstruído com sucesso a partir da estrutura de pastas unificada.")
+
+if __name__ == "__main__":
+    build_scene_database()
+
+--------
+
+#.\web\home.js
+
+/**
+ * Manipula a lógica da tela inicial (home.html).
+ */
+document.addEventListener('DOMContentLoaded', async () => {
+    const buttonsContainer = document.getElementById('actress-buttons');
+    const mainArt = document.getElementById('main-art');
+    const mainArtVideo = document.getElementById('main-art-video');
+    
+    // Mostra um feedback de carregamento
+    buttonsContainer.innerHTML = '<p class="loading-text">Carregando atrizes...</p>';
+
+    // Busca a lista de atrizes no backend Python
+    const actresses = await eel.get_all_actresses()();
+    
+    // Limpa a mensagem de carregamento
+    buttonsContainer.innerHTML = '';
+
+    if (actresses && actresses.length > 0) {
+        // Define a arte principal com o vídeo da primeira atriz da lista
+        // (usando um vídeo como fundo é mais dinâmico que uma imagem)
+        mainArtVideo.src = actresses[0].file_path;
+        mainArtVideo.play();
+
+        // Cria um botão para cada atriz
+        actresses.forEach(actress => {
+            const button = document.createElement('button');
+            button.className = 'actress-btn';
+            button.innerText = actress.actress;
+
+            // Define a ação de clique para navegar para a galeria
+            button.onclick = () => viewActressGallery(actress.actress);
+            
+            // Bônus: muda o vídeo de fundo ao passar o mouse sobre o botão
+            button.onmouseover = () => {
+                if (mainArtVideo.src !== actress.file_path) {
+                    mainArtVideo.src = actress.file_path;
+                    mainArtVideo.play();
+                }
+            };
+            buttonsContainer.appendChild(button);
+        });
+    } else {
+        buttonsContainer.innerHTML = '<p class="loading-text">Nenhuma atriz encontrada no banco de dados.</p>';
+    }
+});
+
+/**
+ * Navega para a página da galeria, usando um caminho absoluto a partir da raiz do servidor.
+ * @param {string} actressName - O nome da atriz selecionada.
+ */
+function viewActressGallery(actressName) {
+    const encodedName = encodeURIComponent(actressName);
+    
+    // [CORRIGIDO] Adiciona uma barra '/' no início do caminho.
+    // Isso diz ao navegador para construir a URL a partir da raiz do site (localhost:8000),
+    // em vez de a partir do diretório atual (/web/).
+    // O Eel então procurará por 'Meu_Visualizador/web/gallery.html'.
+    window.location.href = `/web/gallery.html?actress=${encodedName}`;
+}
+
+--------
+
+#.\web\home_style.css
+
+body, html {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif;
+}
+.splash-container {
+    width: 100%; height: 100%; position: relative;
+}
+.background-video {
+    position: absolute; top: 50%; left: 50%;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    transform: translate(-50%, -50%);
+    z-index: -1;
+    filter: brightness(0.4);
+}
+.main-content {
+    width: 100%; height: 100%;
+    display: flex; flex-direction: column;
+    justify-content: center; align-items: center;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(5px);
+}
+.art-container {
+    text-align: center;
+    margin-bottom: 30px;
+}
+.title {
+    color: white; font-size: 5em; font-weight: 900;
+    text-shadow: 3px 3px 10px rgba(0, 0, 0, 0.9);
+    margin: 0; letter-spacing: 2px;
+}
+.buttons-container {
+    display: flex; flex-wrap: wrap; justify-content: center;
+    gap: 15px; max-width: 80%;
+}
+.actress-btn {
+    background-color: rgba(187, 134, 252, 0.8);
+    color: #fff; border: 1px solid rgba(255, 255, 255, 0.5);
+    padding: 15px 30px; font-size: 1.1em; font-weight: bold;
+    border-radius: 8px; cursor: pointer;
+    transition: transform 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+}
+.actress-btn:hover {
+    transform: scale(1.05);
+    background-color: #bb86fc;
+    box-shadow: 0 0 15px rgba(187, 134, 252, 0.7);
+}
+.loading-text { color: #fff; font-size: 1.2em; }
+
+--------
+
+#.\web\script.js
+
+// --- ESTADO DA APLICAÇÃO (ESPECÍFICO DA GALERIA) ---
+let currentPage = 1;
+let totalPages = 1;
+const sceneColors = ['#3498db', '#e74c3c', '#2ecc71', '#f1c40f', '#9b59b6', '#1abc9c', '#e67e22', '#f39c12'];
+let videoDataCache = {};
+let allAutocompleteTags = [];
+let currentActressName = ''; // Armazena o nome da atriz que estamos visualizando
+
+// --- FUNÇÃO PRINCIPAL DE RENDERIZAÇÃO ---
+function renderGallery(response, isSearchResult = false) {
+    const gallery = document.getElementById('video-gallery');
+    const pagination = document.getElementById('pagination-controls');
+    const clearButton = document.getElementById('clear-button');
+
+    pagination.style.display = isSearchResult || response.videos.length === 0 ? 'none' : 'block';
+    clearButton.style.display = isSearchResult ? 'inline-block' : 'none';
+
+    if (response.error) { gallery.innerHTML = `<h2 style="color:red;">${response.error}</h2>`; return; }
+
+    if (!isSearchResult) {
+        currentPage = response.currentPage;
+        totalPages = response.totalPages;
+        updatePaginationControls();
+    }
+
+    gallery.innerHTML = '';
+    if (response.videos.length === 0) {
+        gallery.innerHTML = isSearchResult ? `<h2>Nenhum vídeo encontrado para a busca "${response.search_query}".</h2>` : '<h2>Nenhum vídeo encontrado para esta atriz.</h2>';
+        return;
+    }
+
+    response.videos.forEach(video => {
+        videoDataCache[video.video_id] = { scenes: null, activeTag: null };
+
+        let tagsHtml = '<div class="tags-container">';
+        if (video.main_tags) {
+            video.main_tags.split(',').forEach(tagWithScore => {
+                const [tagName, score] = tagWithScore.split(':');
+                tagsHtml += `<span class="tag" title="Confiança: ${score}" onclick="toggleTagFilter(${video.video_id}, '${tagName}')">${tagName}</span>`;
+            });
+        }
+        tagsHtml += '</div>';
+
+        const videoCard = document.createElement('div');
+        videoCard.className = 'video-card';
+        videoCard.innerHTML = `
+            <video id="video-${video.video_id}" preload="metadata" controls loop muted></video>
+            <div id="progress-container-${video.video_id}" class="custom-progress-bar-container">
+                <div id="scene-bar-${video.video_id}" class="scene-progress-bar"></div>
+                <div id="playhead-${video.video_id}" class="playhead"></div>
+            </div>
+            <div class="video-info">
+                <h3>${video.video_name}</h3>
+                ${tagsHtml}
+            </div>`;
+        
+        videoCard.querySelector('video').src = video.file_path;
+        gallery.appendChild(videoCard);
+        addEventListenersToVideo(video.video_id, response.highlight_tag);
+    });
+}
+
+
+// --- LÓGICA DE BUSCA E AUTOCOMPLETE ---
+async function performSearch() {
+    const query = document.getElementById('search-input').value;
+    if (!query.trim()) return;
+
+    const gallery = document.getElementById('video-gallery');
+    gallery.innerHTML = `<h2>Buscando por "${query}"...</h2>`;
+    
+    // Passa o nome da atriz atual para a função de busca
+    const response = await eel.search_videos_by_tags(currentActressName, query)();
+    renderGallery(response, true);
+}
+
+function setupAutocomplete(input, tags) {
+    let currentFocus;
+    input.addEventListener("input", function(e) {
+        let val = this.value;
+        closeAllLists();
+        if (!val) return false;
+        currentFocus = -1;
+        const list = document.createElement("DIV");
+        list.setAttribute("id", this.id + "autocomplete-list");
+        list.setAttribute("class", "autocomplete-items");
+        this.parentNode.appendChild(list);
+        const currentTokens = val.split(' ');
+        const lastToken = currentTokens[currentTokens.length - 1].toLowerCase();
+        if (!lastToken) return;
+        tags.forEach(tag => {
+            if (tag.substr(0, lastToken.length).toLowerCase() == lastToken) {
+                const item = document.createElement("DIV");
+                item.innerHTML = "<strong>" + tag.substr(0, lastToken.length) + "</strong>" + tag.substr(lastToken.length);
+                item.addEventListener("click", function(e) {
+                    currentTokens[currentTokens.length - 1] = tag;
+                    input.value = currentTokens.join(' ') + ' ';
+                    closeAllLists();
+                    input.focus();
+                });
+                list.appendChild(item);
+            }
+        });
+    });
+    function closeAllLists(elmnt) {
+        const lists = document.getElementsByClassName("autocomplete-items");
+        for (let list of lists) {
+            if (elmnt != list && elmnt != input) list.parentNode.removeChild(list);
+        }
+    }
+    document.addEventListener("click", e => closeAllLists(e.target));
+}
+
+
+// --- FUNÇÕES DE NAVEGAÇÃO E PLAYER ---
+async function loadVideos(page) {
+    // Passa o nome da atriz atual para a função de paginação
+    const response = await eel.get_videos_page(currentActressName, page)();
+    renderGallery(response, false);
+}
+
+function addEventListenersToVideo(videoId, highlightTag = null) {
+    const videoElement = document.getElementById(`video-${videoId}`);
+    const progressContainer = document.getElementById(`progress-container-${videoId}`);
+    const playhead = document.getElementById(`playhead-${videoId}`);
+
+    videoElement.addEventListener('loadedmetadata', async () => {
+        const scenes = await eel.get_scenes_for_video(videoId)();
+        videoDataCache[videoId].scenes = scenes;
+        if (highlightTag) {
+            setTimeout(() => toggleTagFilter(videoId, highlightTag), 100);
+        } else {
+            drawSceneBar(videoId, videoElement.duration);
+        }
+    });
+
+    videoElement.addEventListener('timeupdate', () => {
+        if (!videoElement.duration) return;
+        const progressPercent = (videoElement.currentTime / videoElement.duration) * 100;
+        playhead.style.left = `${progressPercent}%`;
+    });
+
+    progressContainer.addEventListener('click', (e) => {
+        const rect = progressContainer.getBoundingClientRect();
+        videoElement.currentTime = ((e.clientX - rect.left) / progressContainer.offsetWidth) * videoElement.duration;
+    });
+}
+
+function toggleTagFilter(videoId, clickedTag) {
+    const videoData = videoDataCache[videoId];
+    const videoElement = document.getElementById(`video-${videoId}`);
+    videoData.activeTag = (videoData.activeTag === clickedTag) ? null : clickedTag;
+    const card = videoElement.closest('.video-card');
+    card.querySelectorAll('.tag').forEach(tagEl => {
+        tagEl.classList.toggle('active', tagEl.innerText === videoData.activeTag);
+    });
+    drawSceneBar(videoId, videoElement.duration, videoData.activeTag);
+}
+
+function drawSceneBar(videoId, totalDuration, filterTag = null) {
+    const sceneBar = document.getElementById(`scene-bar-${videoId}`);
+    const scenes = videoDataCache[videoId].scenes;
+    if (!scenes) return;
+    sceneBar.innerHTML = '';
+    scenes.forEach((scene, index) => {
+        const segment = document.createElement('div');
+        segment.className = 'scene-segment';
+        const segmentDuration = scene.end_time - scene.start_time;
+        const segmentWidth = (segmentDuration / totalDuration) * 100;
+        if (filterTag && (!scene.tags || !scene.tags.includes(filterTag))) {
+            segment.classList.add('faded');
+        }
+        segment.style.width = `${segmentWidth}%`;
+        segment.style.backgroundColor = sceneColors[index % sceneColors.length];
+        segment.title = `Cena ${index + 1}: ${scene.start_time.toFixed(1)}s - ${scene.end_time.toFixed(1)}s [${scene.tags || ''}]`;
+        sceneBar.appendChild(segment);
+    });
+}
+
+function updatePaginationControls() {
+    document.getElementById('page-info').textContent = `Página ${currentPage} de ${totalPages}`;
+    document.getElementById('prev-button').disabled = (currentPage <= 1);
+    document.getElementById('next-button').disabled = (currentPage >= totalPages);
+}
+
+
+// --- INICIALIZAÇÃO DA APLICAÇÃO (ESPECÍFICO DA GALERIA) ---
+document.addEventListener('DOMContentLoaded', async () => {
+    // Pega o nome da atriz da URL
+    const params = new URLSearchParams(window.location.search);
+    currentActressName = decodeURIComponent(params.get('actress')); // Decodifica o nome
+
+    if (!currentActressName) {
+        document.body.innerHTML = '<h1>ERRO: Nenhuma atriz especificada.</h1>';
+        return;
+    }
+
+    // Atualiza o título da página
+    document.querySelector('h1').innerText = `Galeria de Cenas: ${currentActressName}`;
+    document.title = `Galeria: ${currentActressName}`;
+
+    // Busca a lista de todas as tags do backend para o autocomplete
+    const tagsJson = await eel.get_all_tags_for_autocomplete()();
+    allAutocompleteTags = JSON.parse(tagsJson);
+    setupAutocomplete(document.getElementById("search-input"), allAutocompleteTags);
+
+    // Adiciona os eventos de clique e teclado aos botões de busca
+    document.getElementById('search-button').addEventListener('click', performSearch);
+    document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') performSearch(); });
+    document.getElementById('clear-button').addEventListener('click', () => { document.getElementById('search-input').value = ''; loadVideos(1); });
+
+    // Adiciona eventos aos botões de paginação
+    document.getElementById('prev-button').addEventListener('click', () => { if (currentPage > 1) loadVideos(currentPage - 1); });
+    document.getElementById('next-button').addEventListener('click', () => { if (currentPage < totalPages) loadVideos(currentPage + 1); });
+
+    // Carrega a visualização inicial (Página 1) para a atriz selecionada
+    loadVideos(1);
+});
+
+--------
+
+#.\web\style.css
+
+/* Estilos Gerais */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: #121212;
+    color: #e0e0e0;
+    margin: 0;
+    padding: 20px;
+}
+.container {
+    max-width: 95%;
+    margin: auto;
+}
+h1 {
+    text-align: center;
+    color: #bb86fc;
+    border-bottom: 2px solid #333;
+    padding-bottom: 10px;
+    margin-bottom: 20px;
+}
+
+/* Galeria de Vídeos */
+.gallery-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    gap: 25px;
+}
+.video-card {
+    background-color: #1e1e1e;
+    border: 1px solid #333;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+}
+.video-card video {
+    width: 100%;
+    display: block;
+    background-color: #000;
+}
+.video-info {
+    padding: 10px 15px;
+}
+.video-info h3 {
+    margin: 0 0 5px 0;
+    font-size: 1.1em;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Barra de Cenas Customizada */
+.custom-progress-bar-container {
+    position: relative;
+    width: 100%;
+    height: 15px;
+    cursor: pointer;
+    background-color: #333;
+}
+.scene-progress-bar {
+    display: flex;
+    width: 100%;
+    height: 100%;
+}
+.scene-segment {
+    height: 100%;
+    transition: opacity 0.3s ease-in-out;
+}
+.scene-segment.faded {
+    opacity: 0.2;
+}
+.scene-segment:not(.faded):hover {
+    filter: brightness(1.2);
+    transform: scaleY(1.1);
+}
+.playhead {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 2px;
+    height: 100%;
+    background-color: rgba(255, 255, 255, 0.8);
+    pointer-events: none;
+}
+
+/* Paginação */
+.pagination {
+    text-align: center;
+    margin-top: 30px;
+}
+.pagination button {
+    background-color: #bb86fc;
+    border: none;
+    color: #121212;
+    padding: 10px 20px;
+    margin: 0 10px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-weight: bold;
+    transition: background-color 0.2s;
+}
+.pagination button:hover {
+    background-color: #9f52f7;
+}
+.pagination button:disabled {
+    background-color: #555;
+    cursor: not-allowed;
+}
+#page-info {
+    font-size: 1.1em;
+    vertical-align: middle;
+}
+
+/* --- Estilos para as Tags Interativas (VERSÃO ATUALIZADA) --- */
+.tags-container {
+    padding-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+
+    /* Limita a altura e adiciona rolagem se necessário */
+    max-height: 4.2em; 
+    overflow-y: auto;  
+    padding-right: 5px; 
+}
+
+.tag {
+    background-color: #3a3b3c;
+    color: #e4e6eb;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 0.85em;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.2s, color 0.2s;
+    border: 1px solid transparent;
+}
+
+.tag:hover {
+    background-color: #4e4f50;
+}
+
+.tag.active {
+    background-color: #bb86fc;
+    color: #121212;
+    border-color: #fff;
+}
+
+/* --- TOQUE FINAL: Estilizando a Barra de Rolagem --- */
+.tags-container::-webkit-scrollbar {
+    width: 8px;
+}
+
+.tags-container::-webkit-scrollbar-track {
+    background: #2a2a2a; 
+    border-radius: 4px;
+}
+
+.tags-container::-webkit-scrollbar-thumb {
+    background-color: #555; 
+    border-radius: 4px;
+    border: 2px solid #2a2a2a; 
+}
+
+.tags-container::-webkit-scrollbar-thumb:hover {
+    background-color: #777;
+}
+
+/* [NOVO] Estilos para a Barra de Busca */
+.search-bar {
+    position: relative;
+    display: flex;
+    justify-content: center;
+    margin-bottom: 25px;
+    gap: 10px;
+}
+#search-input {
+    width: 50%;
+    padding: 10px 15px;
+    font-size: 1em;
+    border: 1px solid #555;
+    border-radius: 5px;
+    background-color: #2a2a2a;
+    color: #fff;
+}
+.search-bar button {
+    background-color: #bb86fc;
+    border: none;
+    color: #121212;
+    padding: 10px 20px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-weight: bold;
+}
+#clear-button {
+    background-color: #444;
+    color: #fff;
+}
+
+/* [NOVO] Estilos para o Autocomplete */
+.autocomplete-items {
+    position: absolute;
+    border: 1px solid #333;
+    border-top: none;
+    z-index: 99;
+    top: 100%;
+    left: 20.5%; /* Alinha com o campo de busca */
+    right: 20.5%;
+    max-height: 200px;
+    overflow-y: auto;
+}
+.autocomplete-items div {
+    padding: 10px;
+    cursor: pointer;
+    background-color: #2a2a2a;
+    border-bottom: 1px solid #333;
+    color: #fff;
+}
+.autocomplete-items div:hover {
+    background-color: #444;
+}
+.autocomplete-active {
+    background-color: #bb86fc !important;
+    color: #121212 !important;
+}
+
+--------
+
