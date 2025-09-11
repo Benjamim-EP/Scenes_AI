@@ -1,15 +1,32 @@
 body {
-  background-color: #282c34;
+  background-color: #1a1a1a;
   color: white;
   font-family: sans-serif;
+  margin: 0;
 }
 
-.App {
+.App-header {
+  background-color: #242424;
+  padding: 1rem;
   text-align: center;
+  border-bottom: 1px solid #444;
 }
 
-.folder-list {
-  margin-top: 2rem;
+.main-content {
+  display: flex;
+}
+
+.sidebar {
+  width: 250px;
+  padding: 1rem;
+  border-right: 1px solid #444;
+  height: calc(100vh - 75px); /* Altura total menos o header */
+  overflow-y: auto;
+}
+
+.content {
+  flex-grow: 1;
+  padding: 1rem;
 }
 
 .folder-list ul {
@@ -18,16 +35,60 @@ body {
 }
 
 .folder-list li {
-  background-color: #444;
-  margin: 0.5rem auto;
-  padding: 1rem;
-  border-radius: 8px;
-  width: 80%;
-  max-width: 500px;
+  background-color: #333;
+  margin-bottom: 0.5rem;
+  padding: 0.75rem;
+  border-radius: 6px;
   cursor: pointer;
   transition: background-color 0.2s;
 }
 
 .folder-list li:hover {
-  background-color: #555;
+  background-color: #4a4a4a;
+}
+
+.grid-placeholder {
+  color: #888;
+  font-style: italic;
+}
+
+/* Estilos para o VideoGrid e VideoCard */
+.video-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.video-card {
+  background-color: #242424;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #444;
+}
+
+.video-thumbnail {
+  background-color: #333;
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #888;
+}
+
+.video-info {
+  padding: 0.75rem;
+}
+
+.video-title {
+  font-weight: bold;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin: 0 0 0.5rem 0;
+}
+
+.video-status {
+  font-size: 0.9em;
+  color: #ccc;
+  margin: 0;
 }

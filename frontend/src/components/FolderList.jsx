@@ -1,15 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
-const API_URL = 'http://localhost:8000/api'; // URL do nosso backend
+const API_URL = 'http://localhost:8000/api';
 
-function FolderList() {
+// O componente recebe 'props' e desestruturamos para pegar onFolderSelect
+function FolderList({ onFolderSelect }) {
   const [folders, setFolders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    // Esta função é executada quando o componente é montado
     const fetchFolders = async () => {
       try {
         setLoading(true);
@@ -23,9 +23,8 @@ function FolderList() {
         setLoading(false);
       }
     };
-
     fetchFolders();
-  }, []); // O array vazio [] garante que isso rode apenas uma vez
+  }, []);
 
   if (loading) return <p>Carregando pastas...</p>;
   if (error) return <p style={{ color: 'red' }}>{error}</p>;
@@ -35,7 +34,20 @@ function FolderList() {
       <h2>Estúdios / Atrizes</h2>
       <ul>
         {folders.map(folder => (
-          <li key={folder}>{folder}</li>
+          // O onClick chama a função que recebemos via props
+          // Adicionamos uma verificação para garantir que é uma função antes de chamar
+          <li 
+            key={folder} 
+            onClick={() => {
+              if (typeof onFolderSelect === 'function') {
+                onFolderSelect(folder);
+              } else {
+                console.error("onFolderSelect não é uma função!", onFolderSelect);
+              }
+            }}
+          >
+            {folder}
+          </li>
         ))}
       </ul>
     </div>
