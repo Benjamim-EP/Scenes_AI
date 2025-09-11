@@ -1,5 +1,10 @@
 import os
+import uuid
 from fastapi import APIRouter, HTTPException
+from fastapi import BackgroundTasks, WebSocket, WebSocketDisconnect
+# Substitua o placeholder pela sua função real
+from app.services.processing_service import run_scene_detection # Placeholder
+from app.core.websockets import manager
 
 # Cria um "roteador" para organizar nossos endpoints de vídeo
 router = APIRouter()
@@ -65,3 +70,36 @@ def get_videos_in_folder(folder_name: str):
         return {"videos": videos}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao ler a pasta: {e}")
+    
+@router.post("/process/{folder_name}/{filename}", status_code=202, tags=["Processing"])
+async def process_video(folder_name: str, filename: str, background_tasks: BackgroundTasks):
+    """
+    Inicia o processo de detecção de cena para um vídeo em segundo plano.
+    """
+    video_path = os.path.join(VIDEOS_BASE_PATH, folder_name, filename)
+    if not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Vídeo não encontrado")
+
+    job_id = str(uuid.uuid4())
+
+    async def progress_callback(data: dict):
+        await manager.send_json(job_id, data)
+
+    # Adiciona a tarefa pesada para ser executada em segundo plano
+    # O primeiro argumento da função run_scene_detection é o video_path
+    # O segundo é a pasta de saída (a mesma do vídeo)
+    # O terceiro é o nosso callback
+    background_tasks.add_task(run_scene_detection, video_path, os.path.join(VIDEOS_BASE_PATH, folder_name), progress_callback)
+    
+    return {"job_id": job_id, "message": "Processamento iniciado"}
+
+
+@router.websocket("/ws/progress/{job_id}")
+async def websocket_endpoint(websocket: WebSocket, job_id: str):
+    await manager.connect(job_id, websocket)
+    try:
+        while True:
+            # Mantém a conexão aberta para receber mensagens do backend
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(job_id)

@@ -1,6 +1,8 @@
 cd backend
 .\venv\Scripts\activate  
 
+pip freeze > requirements.txt
+
 backend
     cd backend
      uvicorn app.main:app --reload
