@@ -1,0 +1,33 @@
+body {
+  background-color: #282c34;
+  color: white;
+  font-family: sans-serif;
+}
+
+.App {
+  text-align: center;
+}
+
+.folder-list {
+  margin-top: 2rem;
+}
+
+.folder-list ul {
+  list-style-type: none;
+  padding: 0;
+}
+
+.folder-list li {
+  background-color: #444;
+  margin: 0.5rem auto;
+  padding: 1rem;
+  border-radius: 8px;
+  width: 80%;
+  max-width: 500px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.folder-list li:hover {
+  background-color: #555;
+}
