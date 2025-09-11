@@ -1,0 +1,31 @@
+.progress-bar-container {
+  width: 100%;
+  height: 20px;
+  background-color: #333;
+  display: flex;
+  position: relative;
+  cursor: pointer;
+  margin-top: 10px;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.scene-segment {
+  height: 100%;
+  transition: filter 0.2s ease-in-out;
+}
+
+.scene-segment:hover {
+  filter: brightness(1.3);
+}
+
+.playhead {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 3px;
+  height: 100%;
+  background-color: white;
+  transform: translateX(-50%); /* Centraliza o pino */
+  pointer-events: none; /* Garante que o clique passe para a barra abaixo */
+}

@@ -4,6 +4,7 @@ import subprocess
 import uuid
 from pathlib import Path
 import mimetypes
+import json
 
 from fastapi import (APIRouter, BackgroundTasks, HTTPException, WebSocket,
                      WebSocketDisconnect)
@@ -191,3 +192,59 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(job_id)
+
+@router.get("/scenes/{folder_name}/{filename}", tags=["Scenes"], summary="Retorna os dados das cenas de um vídeo processado")
+def get_scene_data(folder_name: str, filename: str):
+    """
+    Lê o arquivo _cenas.json e retorna seu conteúdo de forma segura,
+    lidando com todos os tipos de erros de formatação ou conteúdo.
+    """
+    base_name, _ = os.path.splitext(filename)
+    json_path = VIDEOS_BASE_PATH / folder_name / f"{base_name}_cenas.json"
+
+    print(f"\n[DEBUG] Tentando buscar cenas para o arquivo: {json_path}")
+
+    if not os.path.exists(json_path):
+        print(f"[DEBUG] Arquivo de cenas não encontrado. Retornando vazio.")
+        return {"scenes": [], "duration": 0}
+
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            # Se o arquivo estiver vazio, json.load() falha. Tratamos isso primeiro.
+            if not content:
+                print(f"[DEBUG] O arquivo JSON está vazio. Retornando vazio.")
+                return {"scenes": [], "duration": 0}
+            scene_data = json.loads(content)
+
+    except json.JSONDecodeError:
+        print(f"[DEBUG] ERRO: O arquivo JSON '{json_path}' está corrompido.")
+        return {"scenes": [], "duration": 0}
+    except Exception as e:
+        print(f"[DEBUG] ERRO Inesperado ao ler o arquivo: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro inesperado ao ler o arquivo: {e}")
+
+    # --- LÓGICA DE VALIDAÇÃO DO CONTEÚDO ---
+    if not isinstance(scene_data, list):
+        print(f"[DEBUG] Aviso: O conteúdo do JSON não é uma lista. É do tipo {type(scene_data)}.")
+        return {"scenes": [], "duration": 0}
+        
+    if not scene_data:
+        print("[DEBUG] A lista de cenas no JSON está vazia.")
+        return {"scenes": [], "duration": 0}
+        
+    # Filtra apenas as cenas válidas (que são dicionários com as chaves necessárias)
+    valid_scenes = []
+    for scene in scene_data:
+        if isinstance(scene, dict) and 'start_time' in scene and 'end_time' in scene and 'duration' in scene:
+            valid_scenes.append(scene)
+
+    if not valid_scenes:
+        print("[DEBUG] Nenhuma cena válida encontrada dentro da lista no JSON.")
+        return {"scenes": [], "duration": 0}
+
+    # Calcula a duração a partir da última cena válida
+    total_duration = valid_scenes[-1]['end_time']
+    
+    print(f"[DEBUG] Sucesso! Encontradas {len(valid_scenes)} cenas válidas. Duração total: {total_duration}")
+    return {"scenes": valid_scenes, "duration": total_duration}
