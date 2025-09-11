@@ -115,3 +115,14 @@ body {
     text-align: center;
     font-size: 0.9em;
 }
+
+.video-thumbnail img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover; /* Garante que a imagem cubra a área sem distorcer */
+}
+
+.video-card {
+  /* Adicione isso para o cursor indicar que é clicável */
+  cursor: pointer;
+}
