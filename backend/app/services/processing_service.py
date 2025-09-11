@@ -17,7 +17,7 @@ import asyncio
 MODEL_REPO = "SmilingWolf/wd-swinv2-tagger-v3"
 GENERAL_THRESHOLD = 0.35
 CHARACTER_THRESHOLD = 0.85
-BATCH_SIZE = 32 # Tamanho de lote padrão, pode ser sobrescrito
+BATCH_SIZE = 4 # Tamanho de lote padrão, pode ser sobrescrito
 
 # ==============================================================================
 # SEÇÃO 2: CLASSE E FUNÇÕES AUXILIARES DE MACHINE LEARNING
@@ -82,17 +82,19 @@ class Predictor:
 # SEÇÃO 3: FUNÇÕES DO PIPELINE DE PROCESSAMENTO (ADAPTADAS COM CALLBACK)
 # ==============================================================================
 
-async def extrair_frames(caminho_video, diretorio_saida, fps, callback):
-    await callback({"status": "processing", "progress": 5, "message": f"Extraindo frames a {fps} FPS..."})
+# [MODIFICADO] A função extrair_frames agora é síncrona
+def extrair_frames(caminho_video, diretorio_saida, fps):
     os.makedirs(diretorio_saida, exist_ok=True)
     caminho_saida_frames = os.path.join(diretorio_saida, 'frame_%06d.png')
     comando = ['ffmpeg', '-i', caminho_video, '-vf', f'fps={fps}', '-hide_banner', '-loglevel', 'error', caminho_saida_frames]
     
-    process = await asyncio.create_subprocess_exec(*comando)
-    await process.wait()
+    # Usando o subprocess.run síncrono e confiável
+    result = subprocess.run(comando, capture_output=True, text=True)
 
-    if process.returncode != 0:
-        raise Exception("Falha na extração de frames com FFmpeg.")
+    if result.returncode != 0:
+        # Imprime o erro do ffmpeg para ajudar na depuração
+        print("Erro no FFmpeg (extrair_frames):", result.stderr)
+        raise Exception(f"Falha na extração de frames. FFmpeg stderr: {result.stderr}")
     
     return len([f for f in os.listdir(diretorio_saida) if f.endswith('.png')])
 
@@ -111,7 +113,6 @@ async def gerar_tags_para_frames(predictor, pasta_frames, total_frames, batch_si
             results[file_name] = tags
         
         progress_percent = int(((i + len(batch_file_names)) / total_frames) * 100)
-        # Calcula o progresso geral (de 10% a 80% do total)
         overall_progress = 10 + int(0.7 * progress_percent) 
         await callback({"status": "processing", "progress": overall_progress, "message": f"Tagging frames ({progress_percent}%)"})
 
@@ -162,43 +163,38 @@ predictor = Predictor()
 
 async def run_scene_detection(video_path: str, output_folder: str, callback,
                               fps: float = 1.0, limiar_similaridade: float = 0.4, batch_size: int = BATCH_SIZE):
-    """
-    Função orquestradora que executa todo o pipeline de detecção de cena de forma assíncrona.
-    """
     base_name = os.path.splitext(os.path.basename(video_path))[0]
-    # Usar uma pasta temporária local no backend para velocidade máxima
+    # Usa uma pasta temporária na raiz do backend
     temp_frames_path = os.path.join("temp_processing", f"temp_{base_name}_{os.getpid()}")
     os.makedirs(temp_frames_path, exist_ok=True)
     
     try:
-        # Carrega o modelo de ML na primeira execução
         if predictor.model is None:
             await callback({"status": "processing", "progress": 0, "message": "Carregando modelo de IA..."})
             predictor.load_model()
 
-        # 1. Extrair Frames
-        num_frames = await extrair_frames(video_path, temp_frames_path, fps, callback)
+        # 1. Extrair Frames (chamada síncrona)
+        await callback({"status": "processing", "progress": 5, "message": f"Extraindo frames a {fps} FPS..."})
+        num_frames = extrair_frames(video_path, temp_frames_path, fps) # Não precisa mais de await
         if num_frames == 0:
             raise Exception("Nenhum frame foi extraído do vídeo.")
 
-        # 2. Gerar Tags
+        # 2. Gerar Tags (ainda async por causa do callback)
         await callback({"status": "processing", "progress": 10, "message": "Iniciando tagging de frames..."})
         dados_tags = await gerar_tags_para_frames(predictor, temp_frames_path, num_frames, batch_size, callback)
         if not dados_tags:
             raise Exception("Falha ao gerar tags para os frames.")
 
-        # 3. Obter duração do vídeo
+        # 3. Obter duração do vídeo (chamada síncrona)
         await callback({"status": "processing", "progress": 80, "message": "Analisando cenas..."})
         ffprobe_cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path]
-        process = await asyncio.create_subprocess_exec(*ffprobe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, _ = await process.communicate()
-        video_duration = float(stdout.strip())
+        result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, check=True)
+        video_duration = float(result.stdout.strip())
 
-        # 4. Detectar e Agrupar Cenas
+        # ... (Resto da lógica síncrona) ...
         trocas_de_cena, frames_ordenados = detectar_trocas_de_cena(dados_tags, fps, limiar_similaridade)
         cenas_agrupadas = agrupar_cenas_com_tags(trocas_de_cena, frames_ordenados, dados_tags, fps, video_duration)
 
-        # 5. Salvar o JSON
         await callback({"status": "processing", "progress": 95, "message": "Salvando resultados..."})
         json_output_path = os.path.join(output_folder, f"{base_name}_cenas.json")
         with open(json_output_path, 'w', encoding='utf-8') as f:
@@ -208,9 +204,7 @@ async def run_scene_detection(video_path: str, output_folder: str, callback,
 
     except Exception as e:
         await callback({"status": "error", "message": str(e)})
-        # Lança a exceção para que o FastAPI possa logá-la se necessário
         raise e
     finally:
-        # 6. Limpeza
         if os.path.exists(temp_frames_path):
             shutil.rmtree(temp_frames_path)
