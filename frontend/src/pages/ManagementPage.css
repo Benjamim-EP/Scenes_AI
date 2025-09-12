@@ -1,0 +1,106 @@
+.management-page {
+  padding: 1.5rem;
+}
+
+.management-page h2 {
+  text-align: center;
+  margin-bottom: 2rem;
+}
+
+.refresh-btn {
+  display: block;
+  margin: 0 auto 2rem auto;
+  padding: 0.75rem 1.5rem;
+  font-size: 1em;
+}
+
+.status-container {
+  max-width: 900px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+}
+
+.summary-card, .section-card {
+  background-color: #242424;
+  padding: 1.5rem;
+  border-radius: 8px;
+  border: 1px solid #444;
+}
+
+.summary-card h3 {
+  margin: 0 0 0.5rem 0;
+  color: #ccc;
+}
+
+.summary-card p {
+  margin: 0;
+  font-size: 2.5em;
+  font-weight: bold;
+  color: #5f27cd;
+}
+
+.section-card h3 {
+  margin: 0 0 0.5rem 0;
+  border-bottom: 1px solid #444;
+  padding-bottom: 0.5rem;
+}
+
+.section-card > p {
+  color: #aaa;
+  font-style: italic;
+  margin-top: 0;
+}
+
+.file-list {
+  background-color: #1a1a1a;
+  border-radius: 4px;
+  padding: 1rem;
+  max-height: 200px;
+  overflow-y: auto;
+  list-style-type: none;
+}
+
+.file-list li {
+  padding: 0.25rem 0;
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+.action-btn {
+  margin-top: 1rem;
+  width: 100%;
+  padding: 0.75rem;
+  font-weight: bold;
+}
+
+.action-btn.danger {
+  background-color: #c0392b;
+}
+
+.action-btn.danger:hover {
+  background-color: #e74c3c;
+}
+
+.no-issues {
+  color: #2ecc71;
+  font-weight: bold;
+  text-align: center;
+  padding: 1rem;
+}
+
+.action-message {
+  text-align: center;
+  padding: 0.75rem;
+  margin: 0 auto 1.5rem auto;
+  border-radius: 6px;
+  background-color: #333;
+  max-width: 800px;
+}

@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import videos
 from app.api import search
 
+from app.api import management # 1. Importe o novo arquivo
+
 # --- [NOVO] INICIALIZAÇÃO E CRIAÇÃO DE DIRETÓRIOS ---
 # Define o caminho base da pasta 'backend'
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -36,6 +38,7 @@ app.mount("/clips", StaticFiles(directory=CLIPS_DIR), name="clips")
 # Inclui os roteadores da API
 app.include_router(videos.router, prefix="/api", tags=["Media & Processing"])
 app.include_router(search.router, prefix="/api", tags=["Search"])
+app.include_router(management.router, prefix="/api", tags=["Management"]) # 4. Adicione o novo roteador
 
 @app.get("/")
 def read_root():
