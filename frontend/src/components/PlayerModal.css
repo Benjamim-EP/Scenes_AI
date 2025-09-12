@@ -41,3 +41,33 @@
   top: 0;
   left: 0;
 }
+
+.scene-nav-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0 0 0;
+  margin-top: 5px;
+  border-top: 1px solid #444;
+}
+
+.scene-nav-controls button {
+  background-color: #5f27cd;
+  color: white;
+  border: none;
+  padding: 8px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9em;
+}
+
+.scene-nav-controls button:disabled {
+  background-color: #333;
+  color: #777;
+  cursor: not-allowed;
+}
+
+.scene-nav-controls span {
+  font-weight: bold;
+  color: #ccc;
+}

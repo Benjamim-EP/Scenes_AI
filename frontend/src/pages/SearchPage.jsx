@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import axios from 'axios';
-import VideoCard from '../components/VideoCard'; // Importa nosso componente reutilizável
+import VideoCard from '../components/VideoCard';
 import './SearchPage.css';
 
 const API_URL = 'http://localhost:8000/api';
 
-function SearchPage({ onVideoSelect }) { // Recebe onVideoSelect do App.jsx
+function SearchPage({ onVideoSelect }) {
   const [includeTags, setIncludeTags] = useState('');
   const [excludeTags, setExcludeTags] = useState('');
   const [minDuration, setMinDuration] = useState('');
@@ -22,13 +22,12 @@ function SearchPage({ onVideoSelect }) { // Recebe onVideoSelect do App.jsx
     setSearchResults([]);
 
     const payload = {
-      include_tags: includeTags.split(',').map(tag => tag.trim()).filter(Boolean),
-      exclude_tags: excludeTags.split(',').map(tag => tag.trim()).filter(Boolean),
+      include_tags: includeTags.split(',').map(tag => tag.trim().replace(' ', '_')).filter(Boolean),
+      exclude_tags: excludeTags.split(',').map(tag => tag.trim().replace(' ', '_')).filter(Boolean),
       min_duration: minDuration ? parseFloat(minDuration) : null,
     };
 
     try {
-      // O endpoint correto é /search, não /search_videos
       const response = await axios.post(`${API_URL}/search`, payload);
       setSearchResults(response.data.results);
     } catch (err) {
@@ -55,11 +54,12 @@ function SearchPage({ onVideoSelect }) { // Recebe onVideoSelect do App.jsx
           <VideoCard 
             key={video.video_id} 
             video={video}
-            // [A CORREÇÃO ESTÁ AQUI] Passamos a função onVideoSelect para o VideoCard
             onVideoSelect={onVideoSelect} 
           >
-            {/* O conteúdo que vai dentro do card, específico para a página de busca */}
-            <p className="video-status">{video.match_count} cena(s) encontrada(s)</p>
+            {/* [A CORREÇÃO ESTÁ AQUI] Usamos a propriedade correta 'matching_scenes' */}
+            <p className="video-status">
+              {video.matching_scenes.length} cena(s) encontrada(s)
+            </p>
           </VideoCard>
         ))}
       </div>

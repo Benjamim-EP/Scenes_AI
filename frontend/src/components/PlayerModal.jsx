@@ -9,17 +9,20 @@ function PlayerModal({ video, onClose }) {
   const videoRef = useRef(null);
   const [sceneData, setSceneData] = useState({ scenes: [], duration: 0 });
   const [currentTime, setCurrentTime] = useState(0);
+  
+  // --- [NOVA LÓGICA DE NAVEGAÇÃO] ---
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(-1);
+  const matchingScenes = video?.matching_scenes || []; // Lista de cenas da busca
+  const matchingSceneIds = matchingScenes.map(s => s.scene_id); // IDs para o destaque
 
-  const matchingSceneIds = video?.matching_scene_ids || [];
   const videoUrl = video ? `${API_URL}/stream/${encodeURIComponent(video.folder)}/${encodeURIComponent(video.filename)}` : null;
 
   useEffect(() => {
     setSceneData({ scenes: [], duration: 0 });
     setCurrentTime(0);
+    setCurrentMatchIndex(-1); // Reseta o índice da cena
 
-    // [A CORREÇÃO] A condição agora é mais simples: se temos um vídeo, tentamos buscar as cenas.
-    // A API retornará uma lista vazia se o JSON não existir, o que é um comportamento seguro.
-    if (video) { 
+    if (video) {
       const fetchSceneData = async () => {
         try {
           const response = await axios.get(`${API_URL}/scenes/${video.folder}/${video.filename}`);
@@ -27,27 +30,52 @@ function PlayerModal({ video, onClose }) {
             scenes: response.data.scenes || [],
             duration: response.data.duration || 0
           });
-        } catch (error) {
-          console.error("Erro ao buscar dados das cenas:", error);
-          setSceneData({ scenes: [], duration: 0 });
-        }
+        } catch (error) { console.error("Erro ao buscar dados das cenas:", error); }
       };
       fetchSceneData();
     }
   }, [video]);
 
-  // ... (o resto do código: handleSeek, handleLoadedMetadata, etc. permanece igual)
   const handleSeek = (percentage) => {
     if (videoRef.current) {
       videoRef.current.currentTime = sceneData.duration * percentage;
     }
   };
 
+  // Função para pular para o início de uma cena específica
+  const jumpToScene = (scene) => {
+    if (videoRef.current && scene) {
+      videoRef.current.currentTime = scene.start_time;
+      videoRef.current.play();
+    }
+  };
+
+  // --- [NOVAS FUNÇÕES] para os botões de navegação ---
+  const handleNextScene = () => {
+    const nextIndex = currentMatchIndex + 1;
+    if (nextIndex < matchingScenes.length) {
+      setCurrentMatchIndex(nextIndex);
+      jumpToScene(matchingScenes[nextIndex]);
+    }
+  };
+
+  const handlePrevScene = () => {
+    const prevIndex = currentMatchIndex - 1;
+    if (prevIndex >= 0) {
+      setCurrentMatchIndex(prevIndex);
+      jumpToScene(matchingScenes[prevIndex]);
+    }
+  };
+
   const handleLoadedMetadata = () => {
     if (videoRef.current) {
-      videoRef.current.play().catch(error => {
-        console.log("Autoplay impedido pelo navegador:", error);
-      });
+      // Se viemos de uma busca, pula para a primeira cena encontrada
+      if (matchingScenes.length > 0) {
+        setCurrentMatchIndex(0);
+        jumpToScene(matchingScenes[0]);
+      } else {
+        videoRef.current.play().catch(error => console.log("Autoplay impedido:", error));
+      }
     }
   };
 
@@ -90,6 +118,21 @@ function PlayerModal({ video, onClose }) {
           onSeek={handleSeek}
           highlightedSceneIds={matchingSceneIds}
         />
+
+        {/* --- [NOVO] Controles de Navegação de Cena --- */}
+        {matchingScenes.length > 0 && (
+          <div className="scene-nav-controls">
+            <button onClick={handlePrevScene} disabled={currentMatchIndex <= 0}>
+              &lt; Cena Anterior
+            </button>
+            <span>
+              Cena Encontrada: {currentMatchIndex + 1} / {matchingScenes.length}
+            </span>
+            <button onClick={handleNextScene} disabled={currentMatchIndex >= matchingScenes.length - 1}>
+              Próxima Cena &gt;
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

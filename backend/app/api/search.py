@@ -18,14 +18,14 @@ def get_db():
     finally:
         db.close()
 
-@router.post("/search", tags=["Search"], summary="Busca vídeos que contêm cenas com critérios específicos")
+@router.post("/search", tags=["Search"], summary="Busca vídeos e retorna as cenas correspondentes")
 def search_videos(request: SearchRequest, db: sqlite3.Connection = Depends(get_db)):
     """
-    Busca vídeos e retorna uma lista de vídeos que contêm pelo menos uma cena
-    que corresponde aos critérios de busca. A resposta inclui os IDs das cenas correspondentes.
+    Busca vídeos que contêm cenas com critérios específicos e retorna os dados
+    dessas cenas para navegação inteligente.
     """
     
-    # --- Subquery para encontrar os scene_ids que correspondem aos critérios ---
+    # --- Subquery para encontrar os scene_ids que correspondem ---
     subquery_conditions = []
     subquery_params = []
     
@@ -48,27 +48,28 @@ def search_videos(request: SearchRequest, db: sqlite3.Connection = Depends(get_d
     if request.include_tags:
         subquery_from_joins += " JOIN scene_tags st ON s.scene_id = st.scene_id JOIN tags t ON st.tag_id = t.tag_id"
         placeholders = ', '.join('?' for _ in request.include_tags)
-        # Adiciona a condição de tag ao WHERE, não ao HAVING, para performance
         subquery_where += f" AND t.tag_name IN ({placeholders})"
         subquery_params.extend(request.include_tags)
         subquery_having = f"GROUP BY s.scene_id HAVING COUNT(DISTINCT t.tag_name) = ?"
         subquery_params.append(len(request.include_tags))
 
-    # --- Query Principal para agrupar por vídeo ---
+    # --- Query Principal para agrupar por vídeo e coletar cenas correspondentes ---
     query = f"""
     SELECT
         v.video_id,
         v.video_name,
         v.file_path,
-        json_group_array(DISTINCT s_match.scene_id) as matching_scene_ids,
-        COUNT(DISTINCT s_match.scene_id) as match_count
+        -- [MODIFICADO] Agrega um objeto JSON para cada cena correspondente
+        json_group_array(
+            json_object('scene_id', s_match.scene_id, 'start_time', s_match.start_time, 'end_time', s_match.end_time)
+        ) as matching_scenes
     FROM videos v
     JOIN scenes s_match ON v.video_id = s_match.video_id
     WHERE s_match.scene_id IN (
         SELECT s.scene_id {subquery_from_joins} WHERE {subquery_where} {subquery_having}
     )
     GROUP BY v.video_id
-    ORDER BY match_count DESC
+    ORDER BY COUNT(s_match.scene_id) DESC -- Ordena por vídeos com mais cenas correspondentes
     LIMIT ? OFFSET ?
     """
     
@@ -81,13 +82,13 @@ def search_videos(request: SearchRequest, db: sqlite3.Connection = Depends(get_d
         videos = []
         for row in results:
             video = dict(row)
-            video['matching_scene_ids'] = json.loads(video['matching_scene_ids'])
+            # Deserializa a string JSON das cenas
+            video['matching_scenes'] = sorted(json.loads(video['matching_scenes']), key=lambda x: x['start_time'])
             
-            # [CORREÇÃO CRUCIAL] Analisa o file_path para extrair folder e filename
             path_obj = Path(video['file_path'])
             video['filename'] = path_obj.name
             video['folder'] = path_obj.parent.name
-            video['has_scenes_json'] = True # Se está no resultado da busca, tem cenas.
+            video['has_scenes_json'] = True
             
             videos.append(video)
         
