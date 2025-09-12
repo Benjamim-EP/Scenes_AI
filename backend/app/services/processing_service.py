@@ -10,6 +10,9 @@ import json
 import re
 import torch
 import asyncio
+from pathlib import Path
+
+from .database_service import add_video_to_database
 
 # ==============================================================================
 # SEÇÃO 1: CONSTANTES E CONFIGURAÇÕES DO MODELO
@@ -163,48 +166,89 @@ predictor = Predictor()
 
 async def run_scene_detection(video_path: str, output_folder: str, callback,
                               fps: float = 1.0, limiar_similaridade: float = 0.4, batch_size: int = BATCH_SIZE):
+    """
+    Função orquestradora que executa todo o pipeline de detecção de cena,
+    incluindo a atualização final do banco de dados.
+    """
     base_name = os.path.splitext(os.path.basename(video_path))[0]
-    # Usa uma pasta temporária na raiz do backend
+    # Usa uma pasta temporária na raiz do backend para velocidade máxima
     temp_frames_path = os.path.join("temp_processing", f"temp_{base_name}_{os.getpid()}")
     os.makedirs(temp_frames_path, exist_ok=True)
     
     try:
+        # Etapa 0: Carregando o modelo de IA
         if predictor.model is None:
-            await callback({"status": "processing", "progress": 0, "message": "Carregando modelo de IA..."})
+            await callback({"status": "processing", "stage": "LOADING_MODEL", "progress": 2, "message": "Carregando modelo de IA..."})
             predictor.load_model()
 
-        # 1. Extrair Frames (chamada síncrona)
-        await callback({"status": "processing", "progress": 5, "message": f"Extraindo frames a {fps} FPS..."})
-        num_frames = extrair_frames(video_path, temp_frames_path, fps) # Não precisa mais de await
+        # Etapa 1: Extrair Frames
+        await callback({"status": "processing", "stage": "EXTRACTING", "progress": 5, "message": f"Extraindo frames ({fps} FPS)..."})
+        num_frames = extrair_frames(video_path, temp_frames_path, fps)
         if num_frames == 0:
             raise Exception("Nenhum frame foi extraído do vídeo.")
 
-        # 2. Gerar Tags (ainda async por causa do callback)
-        await callback({"status": "processing", "progress": 10, "message": "Iniciando tagging de frames..."})
-        dados_tags = await gerar_tags_para_frames(predictor, temp_frames_path, num_frames, batch_size, callback)
+        # Etapa 2: Gerar Tags
+        await callback({"status": "processing", "stage": "TAGGING", "progress": 15, "message": "Iniciando tagging..."})
+        
+        # A lógica de tagging com progresso granular
+        dados_tags = {}
+        img_files = sorted([f for f in os.listdir(temp_frames_path) if f.lower().endswith('.png')])
+
+        for i in range(0, len(img_files), batch_size):
+            batch_file_names = img_files[i:i + batch_size]
+            # Envolve o carregamento de imagens em um try-except para lidar com frames corrompidos
+            try:
+                batch_images = [Image.open(os.path.join(temp_frames_path, f)) for f in batch_file_names]
+            except Exception as img_err:
+                print(f"Aviso: Falha ao carregar um frame no lote. Pulando. Erro: {img_err}")
+                continue
+
+            batch_tags_result = predictor.predict_batch(batch_images, GENERAL_THRESHOLD, CHARACTER_THRESHOLD)
+            for file_name, tags in zip(batch_file_names, batch_tags_result):
+                dados_tags[file_name] = tags
+            
+            tagging_progress_percent = int(((i + len(batch_file_names)) / num_frames) * 100)
+            overall_progress = 15 + int(0.70 * tagging_progress_percent)
+            await callback({
+                "status": "processing", 
+                "stage": "TAGGING", 
+                "progress": overall_progress, 
+                "message": f"Analisando frames ({tagging_progress_percent}%)"
+            })
+
         if not dados_tags:
             raise Exception("Falha ao gerar tags para os frames.")
 
-        # 3. Obter duração do vídeo (chamada síncrona)
-        await callback({"status": "processing", "progress": 80, "message": "Analisando cenas..."})
+        # Etapa 3: Analisar Cenas
+        await callback({"status": "processing", "stage": "ANALYZING", "progress": 85, "message": "Analisando transições de cena..."})
         ffprobe_cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path]
         result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, check=True)
         video_duration = float(result.stdout.strip())
-
-        # ... (Resto da lógica síncrona) ...
         trocas_de_cena, frames_ordenados = detectar_trocas_de_cena(dados_tags, fps, limiar_similaridade)
         cenas_agrupadas = agrupar_cenas_com_tags(trocas_de_cena, frames_ordenados, dados_tags, fps, video_duration)
 
-        await callback({"status": "processing", "progress": 95, "message": "Salvando resultados..."})
+        # Etapa 4: Salvar Resultados em JSON
+        await callback({"status": "processing", "stage": "SAVING", "progress": 95, "message": "Salvando arquivo de cenas..."})
         json_output_path = os.path.join(output_folder, f"{base_name}_cenas.json")
         with open(json_output_path, 'w', encoding='utf-8') as f:
             json.dump(cenas_agrupadas, f, indent=4, ensure_ascii=False)
 
+        # --- [ETAPA INTEGRADA 5] Adicionar ao Banco de Dados ---
+        await callback({"status": "processing", "stage": "DATABASE", "progress": 98, "message": "Atualizando banco de dados..."})
+        
+        category_name = Path(video_path).parent.name
+        # Chama a função síncrona de forma segura dentro do fluxo assíncrono
+        # O FastAPI/Starlette lida com isso em um thread separado
+        add_video_to_database(video_path, category_name, cenas_agrupadas)
+
         await callback({"status": "completed", "progress": 100, "message": "Processamento concluído!"})
 
     except Exception as e:
-        await callback({"status": "error", "message": str(e)})
+        # Envia uma mensagem de erro detalhada para o frontend
+        await callback({"status": "error", "progress": 0, "message": f"Erro: {str(e)}"})
+        # Lança a exceção para que o FastAPI possa logá-la no console do backend
         raise e
     finally:
+        # Etapa de Limpeza, sempre executada
         if os.path.exists(temp_frames_path):
             shutil.rmtree(temp_frames_path)

@@ -1,0 +1,38 @@
+.process-modal {
+  max-width: 500px;
+}
+
+.modal-video-title {
+  background-color: #333;
+  padding: 10px;
+  border-radius: 4px;
+  margin-bottom: 20px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 8px;
+  color: #ccc;
+}
+
+.form-group input[type="range"] {
+  width: 100%;
+}
+
+.start-process-btn {
+  width: 100%;
+  padding: 12px;
+  font-size: 1.1em;
+  background-color: #5f27cd;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}

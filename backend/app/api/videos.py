@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 
 from app.core.websockets import manager
 from app.services.processing_service import run_scene_detection
+from app.core.schemas import ProcessRequest # Importe o novo modelo
 
 # ==============================================================================
 # --- CONFIGURAÇÃO DO ROTEADOR E CAMINHOS ---
@@ -125,31 +126,39 @@ def stream_video(folder_name: str, filename: str):
 # ==============================================================================
 
 @router.post("/process/{folder_name}/{filename}", status_code=202, tags=["Processing"], summary="Inicia a análise de cenas")
-async def process_video(folder_name: str, filename: str, background_tasks: BackgroundTasks):
+async def process_video(
+    folder_name: str, 
+    filename: str, 
+    # [MODIFICADO] Recebe os parâmetros do corpo da requisição
+    params: ProcessRequest, 
+    background_tasks: BackgroundTasks
+):
     """
-    Inicia o processo de detecção de cena para um vídeo em segundo plano.
+    Inicia o processo de detecção de cena com parâmetros customizados.
     """
     video_path = str(VIDEOS_BASE_PATH / folder_name / filename)
     output_folder = str(VIDEOS_BASE_PATH / folder_name)
+    
     if not os.path.exists(video_path):
         raise HTTPException(status_code=404, detail="Vídeo não encontrado")
+
     job_id = str(uuid.uuid4())
+
     async def progress_callback(data: dict):
         await manager.send_json(job_id, data)
-    background_tasks.add_task(run_scene_detection, video_path=video_path, output_folder=output_folder, callback=progress_callback)
-    return {"job_id": job_id, "message": "Processamento iniciado"}
 
-@router.websocket("/ws/progress/{job_id}")
-async def websocket_endpoint(websocket: WebSocket, job_id: str):
-    """
-    Endpoint WebSocket que o cliente usa para receber atualizações de progresso.
-    """
-    await manager.connect(job_id, websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(job_id)
+    # [MODIFICADO] Passa os parâmetros recebidos para a função de processamento
+    background_tasks.add_task(
+        run_scene_detection,
+        video_path=video_path,
+        output_folder=output_folder,
+        callback=progress_callback,
+        fps=params.fps,
+        limiar_similaridade=params.similarity_threshold,
+        batch_size=params.batch_size
+    )
+    
+    return {"job_id": job_id, "message": "Processamento iniciado com parâmetros customizados"}
 
 # ==============================================================================
 # --- ENDPOINT DE DADOS DE CENAS (CORRIGIDO) ---
