@@ -1,154 +1,14 @@
-#.\app.py
-
-import eel
-import os
-import json
-from urllib.parse import quote
-import shlex
-
-# --- NOSSAS NOVAS IMPORTAÇÕES ---
-# Importa os módulos que contêm a lógica desacoplada
-import database_handler as db
-import processing_logic as proc
-
-# ==============================================================================
-# --- CONFIGURAÇÃO ---
-# ==============================================================================
-TAGS_FILE = "tags.txt"
-ALLOWED_TAGS = set()
-
-def load_allowed_tags():
-    """Lê o arquivo tags.txt e o carrega em um set para busca rápida."""
-    global ALLOWED_TAGS
-    if not os.path.exists(TAGS_FILE):
-        print(f"AVISO: '{TAGS_FILE}' não encontrado. Todas as tags serão exibidas.")
-        return
-    try:
-        with open(TAGS_FILE, 'r', encoding='utf-8') as f:
-            ALLOWED_TAGS = {line.strip() for line in f if line.strip()}
-        print(f"Carregadas {len(ALLOWED_TAGS)} tags permitidas de '{TAGS_FILE}'.")
-    except Exception as e:
-        print(f"ERRO ao ler '{TAGS_FILE}': {e}")
-
-# ==============================================================================
-# --- FUNÇÕES EXPOSTAS AO JAVASCRIPT ---
-# ==============================================================================
-
-@eel.expose
-def get_all_actresses():
-    """Delega a busca por atrizes para o database_handler."""
-    actresses = db.get_actresses()
-    # Prepara os caminhos para uso em URL
-    for actress in actresses:
-        if actress.get('file_path'):
-            actress['file_path'] = quote(actress['file_path'].replace(os.path.sep, '/'))
-    return actresses
-
-@eel.expose
-def get_videos_page(actress_name, page_number=1):
-    """Delega a busca paginada de vídeos para o database_handler."""
-    response = db.get_paged_videos_by_actress(actress_name, page_number)
-    
-    # Processa os resultados para o frontend
-    for video in response['videos']:
-        video['main_tags'] = video.pop('all_tags_with_scores')
-        if video['main_tags'] and ALLOWED_TAGS:
-            video_tags_with_scores = video['main_tags'].split('|||')
-            filtered_tags = [item for item in video_tags_with_scores if item.split(':')[0] in ALLOWED_TAGS]
-            video['main_tags'] = "|||".join(filtered_tags)
-        if video.get('file_path'):
-            video['file_path'] = quote(video['file_path'].replace(os.path.sep, '/'))
-            
-    return response
-
-# [NOVO] Função de processamento agora delega a lógica pesada
-@eel.expose
-def process_video(video_id, fps=1.0, similarity_threshold=0.4, batch_size=32):
-    
-    def progress_callback(vid, status, progress):
-        """Função que será passada para o módulo de processamento para enviar updates."""
-        try:
-            eel.update_process_status(vid, status, progress)()
-            eel.sleep(0.01) # Permite que a mensagem seja enviada
-        except Exception:
-            # Ignora erros se a interface for fechada durante o processamento
-            pass
-
-    try:
-        # Busca o caminho do vídeo usando o handler do DB
-        video_path = db.get_video_path(video_id)
-        if not video_path or not os.path.exists(video_path):
-            raise Exception(f"Caminho do vídeo não encontrado ou inválido: {video_path}")
-
-        # Chama a função principal do pipeline de processamento
-        cenas_agrupadas = proc.run_video_processing_pipeline(
-            video_path=video_path,
-            fps=fps,
-            similarity_threshold=similarity_threshold,
-            batch_size=batch_size,
-            video_id=video_id,
-            progress_callback=progress_callback
-        )
-        
-        progress_callback(video_id, "Salvando no banco de dados...", 95)
-        # Salva os resultados usando o handler do DB
-        db.save_scenes_to_db(video_id, cenas_agrupadas)
-        
-        progress_callback(video_id, "Concluído!", 100)
-        eel.process_finished(video_id, True)()
-
-    except Exception as e:
-        print(f"ERRO no processamento do video {video_id}: {e}")
-        progress_callback(video_id, f"Erro: {e}", -1)
-        eel.process_finished(video_id, False)()
-
-
-# Funções de busca e outras delegam para o database_handler
-@eel.expose
-def get_scenes_for_video(video_id):
-    return db.get_scenes_for_video(video_id)
-
-@eel.expose
-def get_all_tags_for_autocomplete():
-    return json.dumps(sorted(list(ALLOWED_TAGS)))
-
-@eel.expose
-def search_videos_by_tags(actress_name, search_query):
-    # A lógica de busca real pode ser movida para o database_handler também
-    # Por enquanto, mantemos aqui para simplicidade
-    response = db.search_videos(actress_name, search_query) # Supondo que você criou essa função no db handler
-    for video in response['videos']:
-        # ... processamento de tags e caminhos ...
-        pass
-    return response
-
-
-# ==============================================================================
-# --- INICIALIZAÇÃO DA APLICAÇÃO ---
-# ==============================================================================
-if __name__ == "__main__":
-    load_allowed_tags()
-    
-    # Define a pasta 'web' como a raiz da aplicação.
-    eel.init('web')
-    
-    print("Iniciando 'Pulser Edits' (Desacoplado)...")
-    
-    try:
-        eel.start('home.html', size=(1400, 900))
-    except Exception as e:
-        print(f"ERRO ao iniciar o Eel. Verifique se o Chrome/Edge está instalado. Erro: {e}")
-
---------
-
 #.\concatenar.py
 
 import os
 
 # extensões que você quer juntar
-EXTENSOES = {".hml", ".py", ".js", ".css"}
+EXTENSOES = {".html", ".py", ".js", ".css"}
 
-# pasta base (troque se precisar)
+# pastas que você quer ignorar
+IGNORAR_PASTAS = {"venv", "__pycache__",'node_modules'}
+
+# pasta base
 PASTA_BASE = "."
 
 # arquivo final
@@ -157,7 +17,13 @@ ARQUIVO_SAIDA = "arquivos_concatenados.txt"
 
 def concatenar_arquivos(pasta_base, arquivo_saida):
     with open(arquivo_saida, "w", encoding="utf-8") as saida:
-        for root, _, files in os.walk(pasta_base):
+        for root, dirs, files in os.walk(pasta_base):
+            # remove pastas que não devem ser exploradas
+            dirs[:] = [
+                d for d in dirs
+                if d not in IGNORAR_PASTAS and not d.startswith(".")
+            ]
+
             for file in files:
                 _, ext = os.path.splitext(file)
                 if ext.lower() in EXTENSOES:
@@ -193,78 +59,144 @@ from tqdm import tqdm
 # ==============================================================================
 # --- CONFIGURAÇÃO ---
 # ==============================================================================
-DATA_ROOT_FOLDER = os.path.join("web", "videos")
+
+# 1. Pasta raiz onde estão as subpastas das categorias (atrizes/estúdios)
+#    (Ex: 'backend/videos')
+VIDEOS_ROOT_FOLDER = "backend/videos"
+
+# 2. Nome e caminho do arquivo do banco de dados que será criado/atualizado
 DB_FILE = "cenas_database.db"
 
+# 3. Duração mínima (em segundos) que uma cena deve ter para ser catalogada
+MIN_SCENE_DURATION = 2.0
+
 # ==============================================================================
-# --- FUNÇÕES ---
+# --- FUNÇÕES AUXILIARES ---
 # ==============================================================================
+
 def setup_database(db_path):
-    if os.path.exists(db_path): os.remove(db_path)
+    """
+    Cria a estrutura de tabelas no banco de dados SQLite.
+    Se o arquivo já existir, ele será usado; não será apagado.
+    """
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute("PRAGMA foreign_keys = ON;")
-    cursor.execute("CREATE TABLE videos (video_id INTEGER PRIMARY KEY, video_name TEXT NOT NULL UNIQUE, actress TEXT, file_path TEXT)")
-    cursor.execute("CREATE TABLE scenes (scene_id INTEGER PRIMARY KEY, video_id INTEGER NOT NULL, scene_number INTEGER NOT NULL, start_time REAL NOT NULL, end_time REAL NOT NULL, duration REAL NOT NULL, FOREIGN KEY (video_id) REFERENCES videos(video_id))")
-    cursor.execute("CREATE TABLE tags (tag_id INTEGER PRIMARY KEY, tag_name TEXT NOT NULL UNIQUE)")
-    cursor.execute("CREATE TABLE scene_tags (scene_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, score REAL NOT NULL, PRIMARY KEY (scene_id, tag_id), FOREIGN KEY (scene_id) REFERENCES scenes(scene_id) ON DELETE CASCADE, FOREIGN KEY (tag_id) REFERENCES tags(tag_id))")
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS videos (
+        video_id INTEGER PRIMARY KEY,
+        video_name TEXT NOT NULL UNIQUE,
+        category TEXT,
+        file_path TEXT
+    )""")
+    
+    # [MODIFICADO] A coluna clip_path agora pode ser NULL
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS scenes (
+        scene_id INTEGER PRIMARY KEY,
+        video_id INTEGER NOT NULL,
+        scene_number INTEGER NOT NULL,
+        start_time REAL NOT NULL,
+        end_time REAL NOT NULL,
+        duration REAL NOT NULL,
+        clip_path TEXT, -- Será preenchido sob demanda
+        FOREIGN KEY (video_id) REFERENCES videos(video_id) ON DELETE CASCADE
+    )""")
+    
+    cursor.execute("CREATE TABLE IF NOT EXISTS tags (tag_id INTEGER PRIMARY KEY, tag_name TEXT NOT NULL UNIQUE)")
+    
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS scene_tags (
+        scene_id INTEGER NOT NULL,
+        tag_id INTEGER NOT NULL,
+        score REAL NOT NULL,
+        PRIMARY KEY (scene_id, tag_id),
+        FOREIGN KEY (scene_id) REFERENCES scenes(scene_id) ON DELETE CASCADE,
+        FOREIGN KEY (tag_id) REFERENCES tags(tag_id)
+    )""")
+    
     conn.commit()
-    print("Nova estrutura de banco de dados criada.")
+    print(f"Banco de dados '{db_path}' conectado e estrutura verificada.")
     return conn
 
+# ==============================================================================
+# --- FUNÇÃO PRINCIPAL ---
+# ==============================================================================
 def build_scene_database():
+    """
+    Função principal que varre as pastas, processa os JSONs e popula o
+    banco de dados com informações de vídeos e cenas, SEM extrair os clipes.
+    """
     conn = setup_database(DB_FILE)
     cursor = conn.cursor()
 
     try:
-        actress_folders = [d for d in os.listdir(DATA_ROOT_FOLDER) if os.path.isdir(os.path.join(DATA_ROOT_FOLDER, d))]
+        category_folders = [d for d in os.listdir(VIDEOS_ROOT_FOLDER) if os.path.isdir(os.path.join(VIDEOS_ROOT_FOLDER, d)) and not d.startswith('.')]
     except FileNotFoundError:
-        print(f"ERRO: A pasta '{DATA_ROOT_FOLDER}' não foi encontrada.")
+        print(f"ERRO: A pasta raiz de vídeos '{VIDEOS_ROOT_FOLDER}' não foi encontrada.")
         return
 
-    video_extensions = ('.mp4', '.mkv', '.mov', '.webm', '.avi', '.wmv', '.mpg')
+    for category_name in tqdm(category_folders, desc="Processando Categorias"):
+        category_folder_path = os.path.join(VIDEOS_ROOT_FOLDER, category_name)
+        
+        json_files = [f for f in os.listdir(category_folder_path) if f.endswith("_cenas.json")]
 
-    for actress_name in tqdm(actress_folders, desc="Processando Atrizes"):
-        actress_folder_path = os.path.join(DATA_ROOT_FOLDER, actress_name)
-        video_files = [f for f in os.listdir(actress_folder_path) if f.lower().endswith(video_extensions)]
-
-        for video_filename in tqdm(video_files, desc=f"  Vídeos de {actress_name}", leave=False):
-            base_video_name, _ = os.path.splitext(video_filename)
-            json_filename = f"{base_video_name}_cenas.json"
-            json_path = os.path.join(actress_folder_path, json_filename)
-            if not os.path.exists(json_path):
+        for json_filename in tqdm(json_files, desc=f"  Vídeos de '{category_name}'", leave=False):
+            base_video_name = json_filename.replace("_cenas.json", "")
+            
+            source_video_path = None
+            for ext in ['.mp4', '.mkv', '.mov', '.webm', '.avi', '.wmv', '.mpg']:
+                path_try = os.path.join(category_folder_path, f"{base_video_name}{ext}")
+                if os.path.exists(path_try):
+                    source_video_path = path_try
+                    break
+            
+            if not source_video_path:
+                tqdm.write(f"Aviso: Vídeo original para '{json_filename}' não encontrado. Pulando.")
                 continue
 
-            path_to_save_in_db = os.path.join("videos", actress_name, video_filename).replace(os.path.sep, '/')
-            cursor.execute("INSERT OR IGNORE INTO videos (video_name, actress, file_path) VALUES (?, ?, ?)", 
-                           (base_video_name, actress_name, path_to_save_in_db))
-            
+            cursor.execute("INSERT OR IGNORE INTO videos (video_name, category, file_path) VALUES (?, ?, ?)", 
+                           (base_video_name, category_name, source_video_path.replace(os.path.sep, '/')))
             cursor.execute("SELECT video_id FROM videos WHERE video_name = ?", (base_video_name,))
             video_id = cursor.fetchone()[0]
             
+            json_path = os.path.join(category_folder_path, json_filename)
             with open(json_path, 'r', encoding='utf-8') as f:
                 try: scenes_data = json.load(f)
                 except json.JSONDecodeError: continue
 
+            if not isinstance(scenes_data, list): continue
+
             for scene in scenes_data:
-                cursor.execute("INSERT INTO scenes (video_id, scene_number, start_time, end_time, duration) VALUES (?, ?, ?, ?, ?)", (video_id, scene.get('cena_n'), scene.get('start_time'), scene.get('end_time'), scene.get('duration')))
+                scene_duration = scene.get('duration', 0)
+                if scene_duration < MIN_SCENE_DURATION:
+                    continue
+                
+                # Insere a cena no DB sem o clip_path
+                cursor.execute("INSERT INTO scenes (video_id, scene_number, start_time, end_time, duration) VALUES (?, ?, ?, ?, ?)",
+                               (video_id, scene.get('cena_n'), scene.get('start_time'), scene.get('end_time'), scene_duration))
                 scene_id = cursor.lastrowid
-                for tag_name_original, score in scene.get('tags_principais', {}).items():
-                    
-                    # [CORREÇÃO CRUCIAL] Padroniza a tag aqui!
-                    tag_name_standardized = tag_name_original.replace(' ', '_')
 
-                    cursor.execute("INSERT OR IGNORE INTO tags (tag_name) VALUES (?)", (tag_name_standardized,))
-                    cursor.execute("SELECT tag_id FROM tags WHERE tag_name = ?", (tag_name_standardized,))
-                    tag_id_result = cursor.fetchone()
-                    if tag_id_result:
-                        tag_id = tag_id_result[0]
-                        cursor.execute("INSERT INTO scene_tags (scene_id, tag_id, score) VALUES (?, ?, ?)", (scene_id, tag_id, score))
+                # Insere as tags e as relações
+                for tag_name, score in scene.get('tags_principais', {}).items():
+                    tag_name_std = tag_name.replace(' ', '_')
+                    cursor.execute("INSERT OR IGNORE INTO tags (tag_name) VALUES (?)", (tag_name_std,))
+                    cursor.execute("SELECT tag_id FROM tags WHERE tag_name = ?", (tag_name_std,))
+                    tag_id = cursor.fetchone()[0]
+                    cursor.execute("INSERT OR IGNORE INTO scene_tags (scene_id, tag_id, score) VALUES (?, ?, ?)",
+                                   (scene_id, tag_id, score))
+
+            # Salva as alterações no DB para este vídeo
+            conn.commit()
     
-    conn.commit()
     conn.close()
-    print("\nBanco de dados reconstruído com tags padronizadas (espaços -> '_').")
+    print("\n--- Processo de catalogação do banco de dados concluído! ---")
+    print("Nenhum clipe de vídeo foi extraído, apenas as informações foram salvas.")
 
+# ==============================================================================
+# --- EXECUÇÃO ---
+# ==============================================================================
 if __name__ == "__main__":
     build_scene_database()
 
@@ -367,83 +299,460 @@ if __name__ == "__main__":
 
 --------
 
-#.\database_handler.py
+#.\backend\app\main.py
 
-import sqlite3
 import os
+from pathlib import Path
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from app.api import videos
+from app.api import search
 
-DB_FILE = "cenas_database.db"
-PAGE_SIZE = 20
+# --- [NOVO] INICIALIZAÇÃO E CRIAÇÃO DE DIRETÓRIOS ---
+# Define o caminho base da pasta 'backend'
+BASE_DIR = Path(__file__).resolve().parent.parent
 
-def get_connection():
-    """Cria e retorna uma conexão com o banco de dados."""
-    conn = sqlite3.connect(DB_FILE, timeout=10.0)
-    conn.row_factory = sqlite3.Row
-    return conn
+# Define os caminhos para as pastas que a aplicação precisa
+VIDEOS_DIR = BASE_DIR / "videos"
+CLIPS_DIR = BASE_DIR / "clips"
 
-def get_actresses():
-    """Busca a lista de todas as atrizes."""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        query = "SELECT actress, file_path FROM videos WHERE actress IS NOT NULL AND actress != '' GROUP BY actress ORDER BY actress"
-        cursor.execute(query)
-        return [dict(row) for row in cursor.fetchall()]
+# Garante que as pastas essenciais existam ao iniciar a aplicação
+os.makedirs(VIDEOS_DIR, exist_ok=True)
+os.makedirs(CLIPS_DIR, exist_ok=True)
+# --- FIM DA NOVA SEÇÃO ---
 
-def get_paged_videos_by_actress(actress_name, page_number):
-    """Busca uma página de vídeos para uma atriz, incluindo status de processamento e tags."""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM videos WHERE actress = ?", (actress_name,))
-        total_videos = cursor.fetchone()[0]
-        total_pages = (total_videos + PAGE_SIZE - 1) // PAGE_SIZE
-        offset = (page_number - 1) * PAGE_SIZE
-        
-        query = """
-        SELECT v.video_id, v.video_name, v.file_path,
-               (CASE WHEN COUNT(s.scene_id) > 0 THEN 1 ELSE 0 END) as has_scenes,
-               (SELECT GROUP_CONCAT(t.tag_name || ':' || printf("%.2f", top_tags.avg_score), '|||')
-                FROM (SELECT st.tag_id, AVG(st.score) as avg_score FROM scenes s JOIN scene_tags st ON s.scene_id = st.scene_id WHERE s.video_id = v.video_id GROUP BY st.tag_id ORDER BY avg_score DESC) AS top_tags
-                JOIN tags t ON top_tags.tag_id = t.tag_id) AS all_tags_with_scores
-        FROM videos v LEFT JOIN scenes s ON v.video_id = s.video_id
-        WHERE v.actress = ? GROUP BY v.video_id ORDER BY v.video_name LIMIT ? OFFSET ?
-        """
-        cursor.execute(query, (actress_name, PAGE_SIZE, offset))
-        videos = [dict(row) for row in cursor.fetchall()]
-        
-        return {"videos": videos, "currentPage": page_number, "totalPages": total_pages}
+app = FastAPI(title="Video Scene Detector API")
 
-def get_video_path(video_id):
-    """Busca o caminho de um vídeo específico."""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT file_path FROM videos WHERE video_id = ?", (video_id,))
-        result = cursor.fetchone()
-        return result['file_path'] if result else None
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def save_scenes_to_db(video_id, scenes_data):
-    """Salva os dados de cenas processadas no banco de dados."""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        # Limpa dados antigos para este vídeo
-        cursor.execute("DELETE FROM scene_tags WHERE scene_id IN (SELECT scene_id FROM scenes WHERE video_id = ?)", (video_id,))
-        cursor.execute("DELETE FROM scenes WHERE video_id = ?", (video_id,))
-        
-        for scene in scenes_data:
-            cursor.execute("INSERT INTO scenes (video_id, scene_number, start_time, end_time, duration) VALUES (?, ?, ?, ?, ?)",
-                           (video_id, scene.get('cena_n'), scene.get('start_time'), scene.get('end_time'), scene.get('duration')))
-            scene_id = cursor.lastrowid
-            for tag_name, score in scene.get('tags_principais', {}).items():
-                cursor.execute("INSERT OR IGNORE INTO tags (tag_name) VALUES (?)", (tag_name,))
-                cursor.execute("SELECT tag_id FROM tags WHERE tag_name = ?", (tag_name,))
-                tag_id = cursor.fetchone()[0]
-                cursor.execute("INSERT INTO scene_tags (scene_id, tag_id, score) VALUES (?, ?, ?)", (scene_id, tag_id, score))
-        conn.commit()
+# Monta a pasta de clipes como um diretório estático
+# Agora a pasta 'clips' já foi criada, então este comando não falhará
+app.mount("/clips", StaticFiles(directory=CLIPS_DIR), name="clips")
 
-# ... (Você pode adicionar as funções de busca por tag aqui também)
+# Inclui os roteadores da API
+app.include_router(videos.router, prefix="/api", tags=["Media & Processing"])
+app.include_router(search.router, prefix="/api", tags=["Search"])
+
+@app.get("/")
+def read_root():
+    return {"message": "Backend is running!"}
 
 --------
 
-#.\processing_logic.py
+#.\backend\app\api\search.py
+
+import sqlite3
+from fastapi import APIRouter, Depends, HTTPException
+from app.core.schemas import SearchRequest
+from pathlib import Path
+import json
+
+router = APIRouter()
+
+BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+DB_FILE = BASE_DIR / "cenas_database.db"
+
+def get_db():
+    db = sqlite3.connect(DB_FILE)
+    db.row_factory = sqlite3.Row
+    try:
+        yield db
+    finally:
+        db.close()
+
+@router.post("/search_videos", tags=["Search"], summary="Busca vídeos que contêm cenas com critérios específicos")
+def search_videos_with_matching_scenes(request: SearchRequest, db: sqlite3.Connection = Depends(get_db)):
+    """
+    Busca vídeos e retorna uma lista de vídeos que contêm pelo menos uma cena
+    que corresponde aos critérios de busca. A resposta inclui os IDs das cenas correspondentes.
+    """
+    
+    # --- Subquery para encontrar os scene_ids que correspondem aos critérios ---
+    subquery_conditions = []
+    subquery_params = []
+    
+    # Duração
+    if request.min_duration is not None:
+        subquery_conditions.append("s.duration >= ?")
+        subquery_params.append(request.min_duration)
+    if request.max_duration is not None:
+        subquery_conditions.append("s.duration <= ?")
+        subquery_params.append(request.max_duration)
+        
+    # Exclusão de tags
+    if request.exclude_tags:
+        for tag in request.exclude_tags:
+            subquery_conditions.append(f"""
+            s.scene_id NOT IN (
+                SELECT st_exclude.scene_id FROM scene_tags st_exclude
+                JOIN tags t_exclude ON st_exclude.tag_id = t_exclude.tag_id
+                WHERE t_exclude.tag_name = ?
+            )""")
+            subquery_params.append(tag)
+    
+    # Construção da subquery
+    subquery_where = " AND ".join(subquery_conditions) if subquery_conditions else "1=1"
+    
+    # Inclusão de tags (GROUP BY / HAVING)
+    subquery_having = ""
+    if request.include_tags:
+        placeholders = ', '.join('?' for _ in request.include_tags)
+        subquery_having = f"GROUP BY s.scene_id HAVING COUNT(DISTINCT t.tag_name) = ?"
+        subquery_params.extend(request.include_tags)
+        subquery_params.append(len(request.include_tags))
+
+    # --- Query Principal para agrupar por vídeo ---
+    query = f"""
+    SELECT
+        v.video_id,
+        v.video_name,
+        v.file_path,
+        json_group_array(DISTINCT s_match.scene_id) as matching_scene_ids
+    FROM videos v
+    JOIN scenes s_match ON v.video_id = s_match.video_id
+    WHERE s_match.scene_id IN (
+        -- A subquery encontra as cenas correspondentes
+        SELECT s.scene_id
+        FROM scenes s
+        JOIN scene_tags st ON s.scene_id = st.scene_id
+        JOIN tags t ON st.tag_id = t.tag_id
+        WHERE {subquery_where}
+        {subquery_having}
+    )
+    GROUP BY v.video_id
+    """
+    
+    # Paginação (opcional para vídeos, mas boa prática)
+    # query += " LIMIT ? OFFSET ?"
+    # params.extend([request.limit, (request.page - 1) * request.limit])
+
+    try:
+        cursor = db.cursor()
+        print(f"Executando query: {query}")
+        print(f"Com parâmetros: {subquery_params}")
+        results = cursor.execute(query, subquery_params).fetchall()
+
+        videos = []
+        for row in results:
+            video = dict(row)
+            # Deserializa a string JSON dos IDs
+            video['matching_scene_ids'] = json.loads(video['matching_scene_ids'])
+            videos.append(video)
+        
+        return {"results": videos}
+    except sqlite3.Error as e:
+        raise HTTPException(status_code=500, detail=f"Erro no banco de dados: {e}")
+
+--------
+
+#.\backend\app\api\videos.py
+
+import os
+import shutil
+import subprocess
+import uuid
+from pathlib import Path
+import mimetypes
+import json
+
+from fastapi import (APIRouter, BackgroundTasks, HTTPException, WebSocket,
+                     WebSocketDisconnect)
+from fastapi.responses import FileResponse
+
+from app.core.websockets import manager
+# Supondo que seu serviço de processamento esteja pronto e importável
+# Se o arquivo ainda não existe, crie um placeholder ou comente esta linha
+from app.services.processing_service import run_scene_detection
+
+# ==============================================================================
+# --- CONFIGURAÇÃO DO ROTEADOR E CAMINHOS ---
+# ==============================================================================
+router = APIRouter()
+
+# Usando pathlib para uma manipulação de caminhos mais robusta
+BASE_DIR = Path(__file__).resolve().parent.parent.parent # Vai para a raiz da pasta /backend
+VIDEOS_BASE_PATH = BASE_DIR / "videos"
+THUMBNAIL_CACHE_PATH = VIDEOS_BASE_PATH / ".thumbnails" # Pasta oculta para cache
+
+# Cria a pasta de cache de thumbnails na inicialização, se não existir
+os.makedirs(THUMBNAIL_CACHE_PATH, exist_ok=True)
+
+
+# ==============================================================================
+# --- ENDPOINTS DE LISTAGEM ---
+# ==============================================================================
+
+@router.get("/folders", tags=["Folders"], summary="Lista todas as pastas de vídeo de primeiro nível")
+def get_folders():
+    """
+    Escaneia o diretório base de vídeos e retorna uma lista de todas as subpastas.
+    """
+    try:
+        all_items = os.listdir(VIDEOS_BASE_PATH)
+        folders = [
+            item for item in all_items
+            if os.path.isdir(VIDEOS_BASE_PATH / item) and not item.startswith('.')
+        ]
+        return {"folders": sorted(folders)}
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Diretório base de vídeos não encontrado em '{VIDEOS_BASE_PATH}'"
+        )
+
+
+@router.get("/videos/{folder_name}", tags=["Videos"], summary="Lista os vídeos em uma pasta específica")
+def get_videos_in_folder(folder_name: str):
+    """
+    Lista os arquivos de vídeo em uma pasta específica e verifica o status de processamento.
+    """
+    folder_path = VIDEOS_BASE_PATH / folder_name
+    if not os.path.isdir(folder_path):
+        raise HTTPException(status_code=404, detail="Pasta não encontrada")
+
+    supported_extensions = ('.mp4', '.mkv', '.mov', '.avi', '.webm', '.mpg', '.wmv')
+    videos = []
+
+    try:
+        for filename in sorted(os.listdir(folder_path)):
+            if filename.lower().endswith(supported_extensions):
+                base_name, _ = os.path.splitext(filename)
+                
+                # O JSON de cenas é salvo na mesma pasta do vídeo por padrão
+                json_path = folder_path / f"{base_name}_cenas.json"
+                
+                video_info = {
+                    "filename": filename,
+                    "folder": folder_name,
+                    "has_scenes_json": os.path.exists(json_path),
+                }
+                videos.append(video_info)
+        
+        return {"videos": videos}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao ler a pasta: {e}")
+
+
+# ==============================================================================
+# --- ENDPOINTS DE MÍDIA (THUMBNAILS E STREAMING) ---
+# ==============================================================================
+
+@router.get("/thumbnail/{folder_name}/{filename}", tags=["Media"], summary="Gera e serve uma thumbnail")
+def get_thumbnail(folder_name: str, filename: str):
+    """
+    Gera uma thumbnail para um vídeo (se não existir no cache) e a serve como um arquivo de imagem.
+    """
+    video_path = VIDEOS_BASE_PATH / folder_name / filename
+    thumbnail_filename = f"{os.path.splitext(filename)[0]}.jpg"
+    thumbnail_path = THUMBNAIL_CACHE_PATH / thumbnail_filename
+
+    if not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Vídeo não encontrado")
+
+    if not os.path.exists(thumbnail_path):
+        try:
+            # Comando FFmpeg para extrair um frame de forma eficiente
+            command = [
+                'ffmpeg', '-ss', '5', '-i', str(video_path),
+                '-vframes', '1', '-q:v', '3', '-vf', 'scale=320:-1',
+                str(thumbnail_path)
+            ]
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            # Se falhar, talvez o vídeo tenha menos de 5s, tenta no início
+            try:
+                command = [
+                    'ffmpeg', '-i', str(video_path),
+                    '-vframes', '1', '-q:v', '3', '-vf', 'scale=320:-1',
+                    str(thumbnail_path)
+                ]
+                subprocess.run(command, check=True, capture_output=True, text=True)
+            except Exception:
+                raise HTTPException(status_code=500, detail="Falha ao gerar thumbnail")
+
+    return FileResponse(thumbnail_path)
+
+
+@router.get("/stream/{folder_name}/{filename}", tags=["Media"], summary="Serve um arquivo de vídeo")
+def stream_video(folder_name: str, filename: str):
+    """
+    Serve um arquivo de vídeo para ser reproduzido no player do frontend.
+    Determina o tipo de mídia (MIME type) dinamicamente a partir da extensão do arquivo.
+    """
+    video_path = VIDEOS_BASE_PATH / folder_name / filename
+    
+    # Imprime no console do backend o caminho que ele está tentando acessar.
+    # Isso é EXTREMAMENTE útil para depuração!
+    print(f"Tentando servir o vídeo: {video_path}")
+
+    if not os.path.exists(video_path):
+        print(f"ERRO: Arquivo não encontrado em {video_path}")
+        raise HTTPException(status_code=404, detail=f"Vídeo não encontrado em {video_path}")
+    
+    # Determina o tipo de mídia (MIME type) dinamicamente
+    media_type, _ = mimetypes.guess_type(video_path)
+    if media_type is None:
+        # Se não conseguir adivinhar, usa um padrão genérico
+        media_type = "application/octet-stream"
+
+    return FileResponse(video_path, media_type=media_type, headers={"Accept-Ranges": "bytes"})
+
+# ==============================================================================
+# --- ENDPOINTS DE PROCESSAMENTO E WEBSOCKET ---
+# ==============================================================================
+
+@router.post("/process/{folder_name}/{filename}", status_code=202, tags=["Processing"], summary="Inicia a análise de cenas")
+async def process_video(folder_name: str, filename: str, background_tasks: BackgroundTasks):
+    """
+    Inicia o processo de detecção de cena para um vídeo em segundo plano.
+    Retorna imediatamente um 'job_id' para o cliente se conectar via WebSocket.
+    """
+    video_path = str(VIDEOS_BASE_PATH / folder_name / filename)
+    output_folder = str(VIDEOS_BASE_PATH / folder_name)
+    
+    if not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Vídeo não encontrado")
+
+    job_id = str(uuid.uuid4())
+
+    async def progress_callback(data: dict):
+        await manager.send_json(job_id, data)
+
+    background_tasks.add_task(
+        run_scene_detection,
+        video_path=video_path,
+        output_folder=output_folder,
+        callback=progress_callback
+    )
+    
+    return {"job_id": job_id, "message": "Processamento iniciado"}
+
+
+@router.websocket("/ws/progress/{job_id}")
+async def websocket_endpoint(websocket: WebSocket, job_id: str):
+    """
+    Endpoint WebSocket que o cliente usa para receber atualizações de progresso
+    para um 'job_id' específico.
+    """
+    await manager.connect(job_id, websocket)
+    try:
+        while True:
+            # Mantém a conexão viva esperando por mensagens (não esperamos nenhuma do cliente)
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(job_id)
+
+@router.get("/scenes/{folder_name}/{filename}", tags=["Scenes"], summary="Retorna os dados das cenas de um vídeo processado")
+def get_scene_data(folder_name: str, filename: str):
+    """
+    Lê o arquivo _cenas.json e retorna seu conteúdo de forma segura,
+    lidando com todos os tipos de erros de formatação ou conteúdo.
+    """
+    base_name, _ = os.path.splitext(filename)
+    json_path = VIDEOS_BASE_PATH / folder_name / f"{base_name}_cenas.json"
+
+    print(f"\n[DEBUG] Tentando buscar cenas para o arquivo: {json_path}")
+
+    if not os.path.exists(json_path):
+        print(f"[DEBUG] Arquivo de cenas não encontrado. Retornando vazio.")
+        return {"scenes": [], "duration": 0}
+
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            # Se o arquivo estiver vazio, json.load() falha. Tratamos isso primeiro.
+            if not content:
+                print(f"[DEBUG] O arquivo JSON está vazio. Retornando vazio.")
+                return {"scenes": [], "duration": 0}
+            scene_data = json.loads(content)
+
+    except json.JSONDecodeError:
+        print(f"[DEBUG] ERRO: O arquivo JSON '{json_path}' está corrompido.")
+        return {"scenes": [], "duration": 0}
+    except Exception as e:
+        print(f"[DEBUG] ERRO Inesperado ao ler o arquivo: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro inesperado ao ler o arquivo: {e}")
+
+    # --- LÓGICA DE VALIDAÇÃO DO CONTEÚDO ---
+    if not isinstance(scene_data, list):
+        print(f"[DEBUG] Aviso: O conteúdo do JSON não é uma lista. É do tipo {type(scene_data)}.")
+        return {"scenes": [], "duration": 0}
+        
+    if not scene_data:
+        print("[DEBUG] A lista de cenas no JSON está vazia.")
+        return {"scenes": [], "duration": 0}
+        
+    # Filtra apenas as cenas válidas (que são dicionários com as chaves necessárias)
+    valid_scenes = []
+    for scene in scene_data:
+        if isinstance(scene, dict) and 'start_time' in scene and 'end_time' in scene and 'duration' in scene:
+            valid_scenes.append(scene)
+
+    if not valid_scenes:
+        print("[DEBUG] Nenhuma cena válida encontrada dentro da lista no JSON.")
+        return {"scenes": [], "duration": 0}
+
+    # Calcula a duração a partir da última cena válida
+    total_duration = valid_scenes[-1]['end_time']
+    
+    print(f"[DEBUG] Sucesso! Encontradas {len(valid_scenes)} cenas válidas. Duração total: {total_duration}")
+    return {"scenes": valid_scenes, "duration": total_duration}
+
+--------
+
+#.\backend\app\core\schemas.py
+
+from pydantic import BaseModel
+from typing import List, Optional
+
+class SearchRequest(BaseModel):
+    """
+    Define a estrutura dos dados que esperamos receber do frontend
+    para uma requisição de busca.
+    """
+    # Optional[] significa que o campo não é obrigatório
+    include_tags: Optional[List[str]] = []
+    exclude_tags: Optional[List[str]] = []
+    min_duration: Optional[float] = None
+    max_duration: Optional[float] = None
+    sort_by: Optional[str] = 'score' # Padrão para ordenar por score da tag (relevância)
+    page: int = 1
+    limit: int = 24
+
+--------
+
+#.\backend\app\core\websockets.py
+
+from fastapi import WebSocket
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict[str, WebSocket] = {}
+
+    async def connect(self, job_id: str, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections[job_id] = websocket
+
+    def disconnect(self, job_id: str):
+        if job_id in self.active_connections:
+            del self.active_connections[job_id]
+
+    async def send_json(self, job_id: str, data: dict):
+        if job_id in self.active_connections:
+            await self.active_connections[job_id].send_json(data)
+
+manager = ConnectionManager()
+
+--------
+
+#.\backend\app\services\processing_service.py
 
 import os
 import subprocess
@@ -453,149 +762,125 @@ import numpy as np
 import onnxruntime as rt
 import pandas as pd
 from PIL import Image
+import json
 import re
 import torch
+import asyncio
 
 # ==============================================================================
-# --- INICIALIZAÇÃO GLOBAL DO MODELO DE IA ---
+# SEÇÃO 1: CONSTANTES E CONFIGURAÇÕES DO MODELO
 # ==============================================================================
-# Esta instância global será compartilhada por todas as chamadas de processamento,
-# evitando que o modelo seja recarregado da memória a cada vídeo.
-PREDICTOR_GLOBAL = None
+MODEL_REPO = "SmilingWolf/wd-swinv2-tagger-v3"
+GENERAL_THRESHOLD = 0.35
+CHARACTER_THRESHOLD = 0.85
+BATCH_SIZE = 4 # Tamanho de lote padrão, pode ser sobrescrito
 
 # ==============================================================================
-# --- CLASSE PREDICTOR E FUNÇÕES AUXILIARES DE IA ---
+# SEÇÃO 2: CLASSE E FUNÇÕES AUXILIARES DE MACHINE LEARNING
 # ==============================================================================
 
-# Definições auxiliares
+# (Estas são as funções do seu script do Colab, praticamente inalteradas)
 kaomojis = ["0_0", "(o)_(o)", "+_+", "+_-", "._.", "<o>_<o>", "<|>_<|>", "=_=", ">_<", "3_3", "6_9", ">_o", "@_@", "^_^", "o_o", "u_u", "x_x", "|_|", "||_||"]
 
 def load_labels(dataframe):
     name_series = dataframe["name"].map(lambda x: x.replace("_", " ") if x not in kaomojis else x)
-    tag_names = name_series.tolist()
-    # Para esta lógica, só precisamos dos nomes das tags.
-    # Se precisar de categorias no futuro, elas podem ser retornadas aqui.
-    return tag_names
+    return name_series.tolist(), list(np.where(dataframe["category"] == 9)[0]), list(np.where(dataframe["category"] == 0)[0]), list(np.where(dataframe["category"] == 4)[0])
 
 class Predictor:
     def __init__(self):
         self.model = None
         self.tag_names = None
+        self.rating_indexes = None
+        self.general_indexes = None
+        self.character_indexes = None
         self.model_target_size = None
         self.last_loaded_repo = None
 
-    def load_model(self, model_repo="SmilingWolf/wd-swinv2-tagger-v3"):
-        if self.last_loaded_repo == model_repo:
-            return
+    def load_model(self, model_repo=MODEL_REPO):
+        if self.last_loaded_repo == model_repo: return
         
-        print(f"\nCarregando modelo de tagging: {model_repo}...")
-        # Baixa os arquivos do Hugging Face Hub
         csv_path = huggingface_hub.hf_hub_download(model_repo, "selected_tags.csv")
         model_path = huggingface_hub.hf_hub_download(model_repo, "model.onnx")
         
-        tags_df = pd.read_csv(csv_path)
-        self.tag_names = load_labels(tags_df)
-        
-        # Define o provedor de execução (GPU se disponível, senão CPU)
+        self.tag_names, self.rating_indexes, self.general_indexes, self.character_indexes = load_labels(pd.read_csv(csv_path))
         providers = ['CUDAExecutionProvider'] if torch.cuda.is_available() else ['CPUExecutionProvider']
         self.model = rt.InferenceSession(model_path, providers=providers)
-        
         _, height, _, _ = self.model.get_inputs()[0].shape
         self.model_target_size = height
         self.last_loaded_repo = model_repo
-        print(f"Modelo de tagging '{model_repo}' carregado com sucesso no dispositivo {'GPU' if 'CUDAExecutionProvider' in providers else 'CPU'}.")
 
     def prepare_image(self, image):
         image = image.convert("RGB")
         max_dim = max(image.size)
         padded_image = Image.new("RGB", (max_dim, max_dim), (255, 255, 255))
         padded_image.paste(image, ((max_dim - image.size[0]) // 2, (max_dim - image.size[1]) // 2))
-        
         if max_dim != self.model_target_size:
             padded_image = padded_image.resize((self.model_target_size, self.model_target_size), Image.BICUBIC)
-            
         image_array = np.asarray(padded_image, dtype=np.float32)[:, :, ::-1]
         return np.expand_dims(image_array, axis=0)
 
-    def predict_batch(self, images, general_thresh=0.35):
-        if not self.model:
-            raise Exception("Modelo não carregado. Chame load_model() primeiro.")
-            
+    def predict_batch(self, images, general_thresh, character_thresh):
         batch_array = np.vstack([self.prepare_image(img) for img in images])
         input_name = self.model.get_inputs()[0].name
         label_name = self.model.get_outputs()[0].name
-        
         preds_batch = self.model.run([label_name], {input_name: batch_array})[0]
-        
         batch_results = []
         for preds in preds_batch:
             labels = list(zip(self.tag_names, preds.astype(float)))
-            res = {name: float(score) for name, score in labels if score > general_thresh}
-            batch_results.append(res)
+            general_names = [labels[i] for i in self.general_indexes]
+            character_names = [labels[i] for i in self.character_indexes]
+            general_res = {x[0]: float(x[1]) for x in general_names if x[1] > general_thresh}
+            character_res = {x[0]: float(x[1]) for x in character_names if x[1] > character_thresh}
+            batch_results.append({**general_res, **character_res})
         return batch_results
 
 # ==============================================================================
-# --- FUNÇÕES DO PIPELINE DE PROCESSAMENTO ---
+# SEÇÃO 3: FUNÇÕES DO PIPELINE DE PROCESSAMENTO (ADAPTADAS COM CALLBACK)
 # ==============================================================================
 
-def extrair_frames(caminho_video, diretorio_saida, fps, video_id, progress_callback):
-    progress_callback(video_id, "Extraindo frames...", 5)
+# [MODIFICADO] A função extrair_frames agora é síncrona
+def extrair_frames(caminho_video, diretorio_saida, fps):
     os.makedirs(diretorio_saida, exist_ok=True)
     caminho_saida_frames = os.path.join(diretorio_saida, 'frame_%06d.png')
-    comando = ['ffmpeg', '-y', '-i', caminho_video, '-vf', f'fps={fps}', '-hide_banner', '-loglevel', 'error', caminho_saida_frames]
-    try:
-        subprocess.run(comando, check=True, capture_output=True, text=True)
-        num_frames = len([f for f in os.listdir(diretorio_saida) if f.endswith('.png')])
-        progress_callback(video_id, f"{num_frames} frames extraídos.", 20)
-        return num_frames
-    except subprocess.CalledProcessError as e:
-        raise Exception(f"FFmpeg falhou ao extrair frames: {e.stderr}")
-    except Exception as e:
-        raise Exception(f"Erro inesperado na extração de frames: {e}")
+    comando = ['ffmpeg', '-i', caminho_video, '-vf', f'fps={fps}', '-hide_banner', '-loglevel', 'error', caminho_saida_frames]
+    
+    # Usando o subprocess.run síncrono e confiável
+    result = subprocess.run(comando, capture_output=True, text=True)
 
-def gerar_tags_para_frames(predictor, pasta_frames, total_frames, batch_size, video_id, progress_callback):
+    if result.returncode != 0:
+        # Imprime o erro do ffmpeg para ajudar na depuração
+        print("Erro no FFmpeg (extrair_frames):", result.stderr)
+        raise Exception(f"Falha na extração de frames. FFmpeg stderr: {result.stderr}")
+    
+    return len([f for f in os.listdir(diretorio_saida) if f.endswith('.png')])
+
+
+async def gerar_tags_para_frames(predictor, pasta_frames, total_frames, batch_size, callback):
     results = {}
-    img_files = sorted([f for f in os.listdir(pasta_frames) if f.lower().endswith(('.png', '.jpg'))])
-    if not img_files:
-        return None
+    img_files = sorted([f for f in os.listdir(pasta_frames) if f.lower().endswith('.png')])
 
-    processed_frames = 0
     for i in range(0, len(img_files), batch_size):
-        batch_file_names = img_files[i:i+batch_size]
-        batch_images = []
-        for img_file in batch_file_names:
-            try:
-                # Garante que a imagem seja fechada após o uso
-                with Image.open(os.path.join(pasta_frames, img_file)) as image:
-                    batch_images.append(image.copy())
-            except Exception:
-                batch_images.append(None)
+        batch_file_names = img_files[i:i + batch_size]
+        batch_images = [Image.open(os.path.join(pasta_frames, f)) for f in batch_file_names]
         
-        valid_images = [img for img in batch_images if img is not None]
-        if not valid_images:
-            processed_frames += len(batch_file_names)
-            continue
-            
-        try:
-            batch_tags = predictor.predict_batch(valid_images)
-            valid_file_names = [name for name, img in zip(batch_file_names, batch_images) if img is not None]
-            for file_name, tags in zip(valid_file_names, batch_tags):
-                results[file_name] = tags
-                
-            processed_frames += len(batch_file_names)
-            progress = 20 + int((processed_frames / total_frames) * 60)
-            progress_callback(video_id, f"Tagueando frames ({processed_frames}/{total_frames})...", progress)
-        except Exception as e:
-            print(f"Erro ao processar lote de tags: {e}")
-            continue
-            
+        batch_tags = predictor.predict_batch(batch_images, GENERAL_THRESHOLD, CHARACTER_THRESHOLD)
+        
+        for file_name, tags in zip(batch_file_names, batch_tags):
+            results[file_name] = tags
+        
+        progress_percent = int(((i + len(batch_file_names)) / total_frames) * 100)
+        overall_progress = 10 + int(0.7 * progress_percent) 
+        await callback({"status": "processing", "progress": overall_progress, "message": f"Tagging frames ({progress_percent}%)"})
+
     return results
 
-def calcular_similaridade_jaccard(tags1, tags2):
-    set1, set2 = set(tags1.keys()), set(tags2.keys()); intersecao = set1.intersection(set2); uniao = set1.union(set2)
-    return len(intersecao) / len(uniao) if uniao else 1.0
-
 def detectar_trocas_de_cena(dados_tags, fps, limiar_similaridade):
+    def calcular_similaridade_jaccard(tags1, tags2):
+        set1, set2 = set(tags1.keys()), set(tags2.keys())
+        intersecao = set1.intersection(set2)
+        uniao = set1.union(set2)
+        return len(intersecao) / len(uniao) if uniao else 1.0
+
     frames_ordenados = sorted(dados_tags.keys(), key=lambda x: int(re.search(r'(\d+)', x).group(1)))
     trocas_de_cena = [0.0]
     for i in range(len(frames_ordenados) - 1):
@@ -605,804 +890,587 @@ def detectar_trocas_de_cena(dados_tags, fps, limiar_similaridade):
     return trocas_de_cena, frames_ordenados
 
 def agrupar_cenas_com_tags(trocas_de_cena, frames_ordenados, dados_tags, fps, video_duration):
-    cenas_agrupadas = []; trocas_de_cena.append(video_duration)
+    cenas_agrupadas = []
+    trocas_de_cena.append(video_duration)
     for i in range(len(trocas_de_cena) - 1):
         start_time, end_time = trocas_de_cena[i], trocas_de_cena[i+1]
         start_frame_idx = int(start_time * fps)
-        end_frame_idx = min(int(end_time * fps), len(frames_ordenados))
+        end_frame_idx = int(end_time * fps)
         frames_da_cena = frames_ordenados[start_frame_idx:end_frame_idx]
-        tags_agregadas = {}; [tags_agregadas.setdefault(tag, []).append(score) for frame_nome in frames_da_cena for tag, score in dados_tags.get(frame_nome, {}).items()]
+        tags_agregadas = {}
+        for frame_nome in frames_da_cena:
+            for tag, score in dados_tags.get(frame_nome, {}).items():
+                tags_agregadas.setdefault(tag, []).append(score)
         tags_medias = {tag: np.mean(scores) for tag, scores in tags_agregadas.items()}
         tags_principais = sorted(tags_medias.items(), key=lambda item: item[1], reverse=True)
         cenas_agrupadas.append({
-            "cena_n": i + 1,
-            "start_time": round(start_time, 3),
-            "end_time": round(end_time, 3),
+            "cena_n": i + 1, "start_time": round(start_time, 3), "end_time": round(end_time, 3),
             "duration": round(end_time - start_time, 3),
-            "tags_principais": {tag.replace(' ', '_'): round(score, 3) for tag, score in tags_principais}
+            "tags_principais": {tag: round(score, 3) for tag, score in tags_principais}
         })
     return cenas_agrupadas
 
 # ==============================================================================
-# --- FUNÇÃO ORQUESTRADORA PRINCIPAL ---
+# SEÇÃO 4: FUNÇÃO ORQUESTRADORA PRINCIPAL
 # ==============================================================================
 
-def run_video_processing_pipeline(video_path, fps, similarity_threshold, batch_size, video_id, progress_callback):
-    """
-    Função completa que executa todo o pipeline para um vídeo.
-    Retorna os dados das cenas ou levanta uma exceção em caso de erro.
-    """
-    global PREDICTOR_GLOBAL
-    
-    # 1. Carrega o modelo de IA na primeira vez que for necessário
-    if PREDICTOR_GLOBAL is None:
-        progress_callback(video_id, "Carregando modelo de IA (só na 1ª vez)...", 2)
-        PREDICTOR_GLOBAL = Predictor()
-        PREDICTOR_GLOBAL.load_model()
+# Instância única do predictor para evitar recarregar o modelo
+predictor = Predictor()
 
-    temp_frames_path = os.path.join("web", "temp_frames", str(video_id))
+async def run_scene_detection(video_path: str, output_folder: str, callback,
+                              fps: float = 1.0, limiar_similaridade: float = 0.4, batch_size: int = BATCH_SIZE):
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    # Usa uma pasta temporária na raiz do backend
+    temp_frames_path = os.path.join("temp_processing", f"temp_{base_name}_{os.getpid()}")
+    os.makedirs(temp_frames_path, exist_ok=True)
     
     try:
-        # 2. Extrai Frames
-        num_frames = extrair_frames(video_path, temp_frames_path, fps, video_id, progress_callback)
-        if num_frames == 0:
-            raise Exception("Extração de frames falhou ou não gerou frames.")
+        if predictor.model is None:
+            await callback({"status": "processing", "progress": 0, "message": "Carregando modelo de IA..."})
+            predictor.load_model()
 
-        # 3. Gera Tags
-        dados_tags = gerar_tags_para_frames(PREDICTOR_GLOBAL, temp_frames_path, num_frames, batch_size, video_id, progress_callback)
-        if dados_tags is None:
-            raise Exception("Geração de tags falhou.")
-        
-        # 4. Detecta Cenas
-        progress_callback(video_id, "Detectando mudanças de cena...", 85)
+        # 1. Extrair Frames (chamada síncrona)
+        await callback({"status": "processing", "progress": 5, "message": f"Extraindo frames a {fps} FPS..."})
+        num_frames = extrair_frames(video_path, temp_frames_path, fps) # Não precisa mais de await
+        if num_frames == 0:
+            raise Exception("Nenhum frame foi extraído do vídeo.")
+
+        # 2. Gerar Tags (ainda async por causa do callback)
+        await callback({"status": "processing", "progress": 10, "message": "Iniciando tagging de frames..."})
+        dados_tags = await gerar_tags_para_frames(predictor, temp_frames_path, num_frames, batch_size, callback)
+        if not dados_tags:
+            raise Exception("Falha ao gerar tags para os frames.")
+
+        # 3. Obter duração do vídeo (chamada síncrona)
+        await callback({"status": "processing", "progress": 80, "message": "Analisando cenas..."})
         ffprobe_cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path]
-        video_duration = float(subprocess.check_output(ffprobe_cmd).strip())
-        
-        trocas_de_cena, frames_ordenados = detectar_trocas_de_cena(dados_tags, fps, similarity_threshold)
+        result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, check=True)
+        video_duration = float(result.stdout.strip())
+
+        # ... (Resto da lógica síncrona) ...
+        trocas_de_cena, frames_ordenados = detectar_trocas_de_cena(dados_tags, fps, limiar_similaridade)
         cenas_agrupadas = agrupar_cenas_com_tags(trocas_de_cena, frames_ordenados, dados_tags, fps, video_duration)
-        
-        return cenas_agrupadas
-        
+
+        await callback({"status": "processing", "progress": 95, "message": "Salvando resultados..."})
+        json_output_path = os.path.join(output_folder, f"{base_name}_cenas.json")
+        with open(json_output_path, 'w', encoding='utf-8') as f:
+            json.dump(cenas_agrupadas, f, indent=4, ensure_ascii=False)
+
+        await callback({"status": "completed", "progress": 100, "message": "Processamento concluído!"})
+
+    except Exception as e:
+        await callback({"status": "error", "message": str(e)})
+        raise e
     finally:
-        # 5. Limpeza da pasta temporária
         if os.path.exists(temp_frames_path):
             shutil.rmtree(temp_frames_path)
 
 --------
 
-#.\web\home.js
+#.\frontend\eslint.config.js
 
-/**
- * Manipula a lógica da tela inicial (home.html).
- */
-document.addEventListener('DOMContentLoaded', async () => {
-    const buttonsContainer = document.getElementById('actress-buttons');
-    const mainArt = document.getElementById('main-art');
-    const mainArtVideo = document.getElementById('main-art-video');
-    
-    // Mostra um feedback de carregamento
-    buttonsContainer.innerHTML = '<p class="loading-text">Carregando atrizes...</p>';
+import js from '@eslint/js'
+import globals from 'globals'
+import reactHooks from 'eslint-plugin-react-hooks'
+import reactRefresh from 'eslint-plugin-react-refresh'
+import { defineConfig, globalIgnores } from 'eslint/config'
 
-    // Busca a lista de atrizes no backend Python
-    const actresses = await eel.get_all_actresses()();
-    
-    // Limpa a mensagem de carregamento
-    buttonsContainer.innerHTML = '';
-
-    if (actresses && actresses.length > 0) {
-        // Define a arte principal com o vídeo da primeira atriz da lista
-        // (usando um vídeo como fundo é mais dinâmico que uma imagem)
-        mainArtVideo.src = actresses[0].file_path;
-        mainArtVideo.play();
-
-        // Cria um botão para cada atriz
-        actresses.forEach(actress => {
-            const button = document.createElement('button');
-            button.className = 'actress-btn';
-            button.innerText = actress.actress;
-
-            // Define a ação de clique para navegar para a galeria
-            button.onclick = () => viewActressGallery(actress.actress);
-            
-            // Bônus: muda o vídeo de fundo ao passar o mouse sobre o botão
-            button.onmouseover = () => {
-                if (mainArtVideo.src !== actress.file_path) {
-                    mainArtVideo.src = actress.file_path;
-                    mainArtVideo.play();
-                }
-            };
-            buttonsContainer.appendChild(button);
-        });
-    } else {
-        buttonsContainer.innerHTML = '<p class="loading-text">Nenhuma atriz encontrada no banco de dados.</p>';
-    }
-});
-
-/**
- * Navega para a página da galeria, usando um caminho absoluto a partir da raiz do servidor.
- * @param {string} actressName - O nome da atriz selecionada */
-function viewActressGallery(actressName) {
-    const encodedName = encodeURIComponent(actressName);
-    
-    // [CONFIGURAÇÃO FINAL E CORRETA]
-    // Como a raiz do servidor é a pasta 'web', o caminho para a galeria é simplesmente 'gallery.html'
-    window.location.href = `gallery.html?actress=${encodedName}`;
-}
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{js,jsx}'],
+    extends: [
+      js.configs.recommended,
+      reactHooks.configs['recommended-latest'],
+      reactRefresh.configs.vite,
+    ],
+    languageOptions: {
+      ecmaVersion: 2020,
+      globals: globals.browser,
+      parserOptions: {
+        ecmaVersion: 'latest',
+        ecmaFeatures: { jsx: true },
+        sourceType: 'module',
+      },
+    },
+    rules: {
+      'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+    },
+  },
+])
 
 --------
 
-#.\web\home_style.css
+#.\frontend\index.html
 
-body, html {
-    margin: 0; padding: 0; width: 100%; height: 100%;
-    overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif;
-}
-.splash-container {
-    width: 100%; height: 100%; position: relative;
-}
-.background-video {
-    position: absolute; top: 50%; left: 50%;
-    width: 100%; height: 100%;
-    object-fit: cover;
-    transform: translate(-50%, -50%);
-    z-index: -1;
-    filter: brightness(0.4);
-}
-.main-content {
-    width: 100%; height: 100%;
-    display: flex; flex-direction: column;
-    justify-content: center; align-items: center;
-    background: rgba(0, 0, 0, 0.5);
-    backdrop-filter: blur(5px);
-}
-.art-container {
-    text-align: center;
-    margin-bottom: 30px;
-}
-.title {
-    color: white; font-size: 5em; font-weight: 900;
-    text-shadow: 3px 3px 10px rgba(0, 0, 0, 0.9);
-    margin: 0; letter-spacing: 2px;
-}
-.buttons-container {
-    display: flex; flex-wrap: wrap; justify-content: center;
-    gap: 15px; max-width: 80%;
-}
-.actress-btn {
-    background-color: rgba(187, 134, 252, 0.8);
-    color: #fff; border: 1px solid rgba(255, 255, 255, 0.5);
-    padding: 15px 30px; font-size: 1.1em; font-weight: bold;
-    border-radius: 8px; cursor: pointer;
-    transition: transform 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
-}
-.actress-btn:hover {
-    transform: scale(1.05);
-    background-color: #bb86fc;
-    box-shadow: 0 0 15px rgba(187, 134, 252, 0.7);
-}
-.loading-text { color: #fff; font-size: 1.2em; }
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vite + React</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
 
 --------
 
-#.\web\script.js
+#.\frontend\vite.config.js
 
-// --- ESTADO DA APLICAÇÃO ---
-let currentPage = 1;
-let totalPages = 1;
-let currentActressName = '';
-let currentSearchQuery = '';
-let currentSearchTag = null;
-let isFetching = false;
-const sceneColors = ['#3498db', '#e74c3c', '#2ecc71', '#f1c40f', '#9b59b6', '#1abc9c', '#e67e22', '#f39c12'];
-let videoDataCache = {};
-let allAutocompleteTags = [];
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react-swc'
 
-// --- FUNÇÕES DE RENDERIZAÇÃO E LÓGICA PRINCIPAL ---
-function renderGallery(response, isSearchResult = false) {
-    const gallery = document.getElementById('video-gallery');
-    
-    // Apenas limpa a galeria para uma nova busca ou na primeira página
-    if (isSearchResult && currentPage === 1) {
-        gallery.innerHTML = '';
-    } else if (!isSearchResult && currentPage === 1) {
-        gallery.innerHTML = '';
-    }
-
-    currentSearchQuery = isSearchResult ? response.search_query : '';
-    currentSearchTag = isSearchResult ? response.highlight_tag : null;
-
-    document.getElementById('pagination-controls').style.display = isSearchResult || response.videos.length === 0 ? 'none' : 'block';
-    document.getElementById('clear-button').style.display = isSearchResult ? 'inline-block' : 'none';
-
-    if (response.error) { gallery.innerHTML = `<h2 style="color:red;">${response.error}</h2>`; return; }
-
-    if (!isSearchResult) {
-        currentPage = response.currentPage;
-        totalPages = response.totalPages;
-        updatePaginationControls();
-    }
-
-    if (response.videos.length === 0 && currentPage === 1) {
-        gallery.innerHTML = isSearchResult ? `<h2>Nenhum vídeo encontrado para "${response.search_query}".</h2>` : '<h2>Nenhum vídeo encontrado para esta atriz.</h2>';
-        return;
-    }
-
-    response.videos.forEach(video => {
-        const videoCard = document.createElement('div');
-        videoCard.className = 'video-card';
-        videoCard.id = `card-${video.video_id}`;
-        
-        if (video.has_scenes) {
-            videoCard.innerHTML = renderProcessedCard(video);
-        } else {
-            videoCard.innerHTML = renderUnprocessedCard(video);
-        }
-        
-        gallery.appendChild(videoCard);
-
-        if (video.has_scenes) {
-            videoCard.querySelector('video').src = video.file_path;
-            addEventListenersToVideo(video.video_id, response.highlight_tag);
-        }
-    });
-}
-
-function renderProcessedCard(video) {
-    let tagsHtml = '<div class="tags-container">';
-    if (video.main_tags) {
-        video.main_tags.split('|||').forEach(tagWithScore => {
-            const [tagName, score] = tagWithScore.split(':');
-            tagsHtml += `<span class="tag" title="Confiança: ${score}" onclick="toggleTagFilter(${video.video_id}, '${tagName}')">${tagName}</span>`;
-        });
-    }
-    tagsHtml += '</div>';
-
-    return `
-        <video id="video-${video.video_id}" preload="metadata" controls loop muted></video>
-        <div id="progress-container-${video.video_id}" class="custom-progress-bar-container">
-            <div id="scene-bar-${video.video_id}" class="scene-progress-bar"></div>
-            <div id="playhead-${video.video_id}" class="playhead"></div>
-        </div>
-        <div class="video-info">
-            <div class="card-header">
-                <h3>${video.video_name}</h3>
-                <button class="next-scene-btn" onclick="startProcessing(${video.video_id}, true)">Refazer</button>
-            </div>
-            ${tagsHtml}
-        </div>
-        <div id="processing-overlay-${video.video_id}" class="processing-overlay">
-            <div class="progress-bar-container">
-                <div id="progress-fill-${video.video_id}" class="progress-bar-fill"></div>
-            </div>
-            <p id="progress-status-${video.video_id}">Iniciando...</p>
-        </div>
-    `;
-}
-
-function renderUnprocessedCard(video) {
-    return `
-        <div class="unprocessed-card">
-            <video class="video-thumbnail" src="${video.file_path}" preload="metadata" muted></video>
-            <button class="process-btn" onclick="startProcessing(${video.video_id})">Analisar Cenas</button>
-        </div>
-        <div class="video-info">
-            <div class="card-header">
-                <h3>${video.video_name}</h3>
-            </div>
-        </div>
-        <div id="processing-overlay-${video.video_id}" class="processing-overlay">
-            <div class="progress-bar-container">
-                <div id="progress-fill-${video.video_id}" class="progress-bar-fill"></div>
-            </div>
-            <p id="progress-status-${video.video_id}">Iniciando...</p>
-        </div>
-    `;
-}
-
-// --- LÓGICA DE PROCESSAMENTO (CHAMADA PELOS BOTÕES) ---
-function startProcessing(videoId, isRemake = false) {
-    const overlay = document.getElementById(`processing-overlay-${videoId}`);
-    if (overlay) {
-        overlay.classList.add('visible');
-    }
-    update_process_status(videoId, "Enviando para o backend...", 1);
-    eel.process_video(videoId, 1.0, 0.4, 32);
-}
-
-// --- FUNÇÕES EXPOSTAS AO PYTHON (CALLBACKS) ---
-eel.expose(update_process_status, 'update_process_status');
-function update_process_status(videoId, status, progress) {
-    const statusText = document.getElementById(`progress-status-${videoId}`);
-    const progressBarFill = document.getElementById(`progress-fill-${videoId}`);
-    
-    if (statusText) statusText.textContent = status;
-    if (progressBarFill) {
-        if (progress === -1) {
-            progressBarFill.style.width = '100%';
-            progressBarFill.style.backgroundColor = '#e74c3c';
-        } else {
-            progressBarFill.style.width = `${progress}%`;
-            progressBarFill.style.backgroundColor = '#bb86fc';
-        }
-    }
-}
-
-eel.expose(process_finished, 'process_finished');
-async function process_finished(videoId, success) {
-    if (success) {
-        // Recarrega a página atual para refletir as mudanças
-        if (currentSearchQuery) {
-            performSearch(currentPage);
-        } else {
-            loadVideos(currentPage);
-        }
-    } else {
-        setTimeout(() => {
-            const overlay = document.getElementById(`processing-overlay-${videoId}`);
-            if (overlay) overlay.classList.remove('visible');
-        }, 5000);
-    }
-}
-
-// --- LÓGICA DE BUSCA, PLAYER E NAVEGAÇÃO ---
-function jumpToNextScene(videoId) {
-    const videoElement = document.getElementById(`video-${videoId}`);
-    const scenes = videoDataCache[videoId]?.scenes;
-    if (!videoElement || !scenes || scenes.length === 0) return;
-    const currentTime = videoElement.currentTime;
-    let targetScenes = scenes;
-    if (currentSearchTag) {
-        targetScenes = scenes.filter(scene => scene.tags && scene.tags.split(',').includes(currentSearchTag));
-        const btn = videoElement.closest('.video-card').querySelector('.next-scene-btn');
-        if (btn) btn.innerHTML = `Próxima com "${currentSearchTag}" &raquo;`;
-    }
-    if (targetScenes.length === 0) return;
-    let nextScene = targetScenes.find(scene => scene.start_time > currentTime + 0.1);
-    if (!nextScene) nextScene = targetScenes[0];
-    videoElement.currentTime = nextScene.start_time;
-    videoElement.play();
-}
-
-async function performSearch(page = 1) {
-    if (page === 1) {
-        currentSearchQuery = document.getElementById('search-input').value;
-        currentPage = 1; // Reseta a página para uma nova busca
-        document.getElementById('video-gallery').innerHTML = `<h2>Buscando por "${currentSearchQuery}"...</h2>`;
-    }
-    if (!currentSearchQuery.trim() || isFetching) return;
-    isFetching = true;
-    const response = await eel.search_videos_by_tags(currentActressName, currentSearchQuery, page)();
-    renderGallery(response, true);
-    isFetching = false;
-}
-
-function setupAutocomplete(input, tags) { /* ...código completo do autocomplete... */ }
-async function loadVideos(page) {
-    isFetching = true;
-    const response = await eel.get_videos_page(currentActressName, page)();
-    renderGallery(response, false);
-    isFetching = false;
-}
-
-function addEventListenersToVideo(videoId, highlightTag = null) {
-    const videoElement = document.getElementById(`video-${videoId}`);
-    const progressContainer = document.getElementById(`progress-container-${videoId}`);
-    const playhead = document.getElementById(`playhead-${videoId}`);
-    videoElement.addEventListener('loadedmetadata', async () => {
-        const scenes = await eel.get_scenes_for_video(videoId)();
-        videoDataCache[videoId].scenes = scenes;
-        if (highlightTag) {
-            setTimeout(() => toggleTagFilter(videoId, highlightTag), 100);
-        } else {
-            drawSceneBar(videoId, videoElement.duration);
-        }
-    });
-    videoElement.addEventListener('timeupdate', () => {
-        if (!videoElement.duration) return;
-        const progressPercent = (videoElement.currentTime / videoElement.duration) * 100;
-        playhead.style.left = `${progressPercent}%`;
-    });
-    progressContainer.addEventListener('click', (e) => {
-        const rect = progressContainer.getBoundingClientRect();
-        videoElement.currentTime = ((e.clientX - rect.left) / progressContainer.offsetWidth) * videoElement.duration;
-    });
-}
-
-function toggleTagFilter(videoId, clickedTag) {
-    const videoData = videoDataCache[videoId];
-    const videoElement = document.getElementById(`video-${videoId}`);
-    videoData.activeTag = (videoData.activeTag === clickedTag) ? null : clickedTag;
-    const card = videoElement.closest('.video-card');
-    card.querySelectorAll('.tag').forEach(tagEl => {
-        tagEl.classList.toggle('active', tagEl.innerText === videoData.activeTag);
-    });
-    drawSceneBar(videoId, videoElement.duration, videoData.activeTag);
-}
-
-function drawSceneBar(videoId, totalDuration, filterTag = null) {
-    const sceneBar = document.getElementById(`scene-bar-${videoId}`);
-    const scenes = videoDataCache[videoId].scenes;
-    if (!scenes) return;
-    sceneBar.innerHTML = '';
-    scenes.forEach((scene, index) => {
-        const segment = document.createElement('div');
-        segment.className = 'scene-segment';
-        const segmentDuration = scene.end_time - scene.start_time;
-        const segmentWidth = (segmentDuration / totalDuration) * 100;
-        if (filterTag && (!scene.tags || !scene.tags.split(',').includes(filterTag))) {
-            segment.classList.add('faded');
-        }
-        segment.style.width = `${segmentWidth}%`;
-        segment.style.backgroundColor = sceneColors[index % sceneColors.length];
-        segment.title = `Cena ${index + 1}: ${scene.start_time.toFixed(1)}s - ${scene.end_time.toFixed(1)}s [${scene.tags || ''}]`;
-        sceneBar.appendChild(segment);
-    });
-}
-
-function updatePaginationControls() {
-    document.getElementById('page-info').textContent = `Página ${currentPage} de ${totalPages}`;
-    document.getElementById('prev-button').disabled = (currentPage <= 1);
-    document.getElementById('next-button').disabled = (currentPage >= totalPages);
-}
-
-// --- INICIALIZAÇÃO E EVENTOS GLOBAIS ---
-document.addEventListener('DOMContentLoaded', async () => {
-    // ... (código de inicialização anterior)
-    const params = new URLSearchParams(window.location.search);
-    currentActressName = decodeURIComponent(params.get('actress'));
-    if (!currentActressName || currentActressName === 'null') {
-        document.body.innerHTML = '<h1>ERRO: Nenhuma atriz especificada.</h1>'; return;
-    }
-    document.querySelector('h1').innerText = `Galeria de Cenas: ${currentActressName}`;
-    document.title = `Galeria: ${currentActressName}`;
-    const tagsJson = await eel.get_all_tags_for_autocomplete()();
-    allAutocompleteTags = JSON.parse(tagsJson);
-    setupAutocomplete(document.getElementById("search-input"), allAutocompleteTags);
-    document.getElementById('search-button').addEventListener('click', () => performSearch(1));
-    document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); performSearch(1); } });
-    document.getElementById('clear-button').addEventListener('click', () => { document.getElementById('search-input').value = ''; currentSearchQuery = ''; loadVideos(1); });
-    document.getElementById('prev-button').addEventListener('click', () => { if (currentPage > 1) loadVideos(currentPage - 1); });
-    document.getElementById('next-button').addEventListener('click', () => { if (currentPage < totalPages) loadVideos(currentPage + 1); });
-    loadVideos(1);
-});
-
-// Lógica de scroll infinito
-window.onscroll = () => {
-    if (isFetching || currentPage >= totalPages) return;
-    if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 500) {
-        if (currentSearchQuery) {
-            performSearch(currentPage + 1);
-        } else {
-            loadVideos(currentPage + 1);
-        }
-    }
-};
-
-// Cole a função setupAutocomplete completa aqui se precisar.
-function setupAutocomplete(input, tags) {let currentFocus;input.addEventListener("input",function(e){let a,b,i,val=this.value;closeAllLists();if(!val)return false;currentFocus=-1;a=document.createElement("DIV");a.setAttribute("id",this.id+"autocomplete-list");a.setAttribute("class","autocomplete-items");this.parentNode.appendChild(a);const lastTokenIndex=val.lastIndexOf(' ')+1;const lastToken=val.substring(lastTokenIndex).toLowerCase();if(!lastToken)return;for(i=0;i<tags.length;i++){if(tags[i].substr(0,lastToken.length).toLowerCase()==lastToken){b=document.createElement("DIV");b.innerHTML="<strong>"+tags[i].substr(0,lastToken.length)+"</strong>";b.innerHTML+=tags[i].substr(lastToken.length);b.innerHTML+="<input type='hidden' value='"+tags[i]+"'>";b.addEventListener("click",function(e){const base=val.substring(0,lastTokenIndex);const tagToAdd=this.getElementsByTagName("input")[0].value;const finalTag=tagToAdd.includes(' ')?`"${tagToAdd}"`:tagToAdd;input.value=base+finalTag+' ';closeAllLists();input.focus();});a.appendChild(b);}}});input.addEventListener("keydown",function(e){let x=document.getElementById(this.id+"autocomplete-list");if(x)x=x.getElementsByTagName("div");if(e.keyCode==40){currentFocus++;addActive(x);}else if(e.keyCode==38){currentFocus--;addActive(x);}else if(e.keyCode==13){if(currentFocus>-1){if(x)x[currentFocus].click();}}});function addActive(x){if(!x)return false;removeActive(x);if(currentFocus>=x.length)currentFocus=0;if(currentFocus<0)currentFocus=x.length-1;x[currentFocus].classList.add("autocomplete-active");}function removeActive(x){for(var i=0;i<x.length;i++){x[i].classList.remove("autocomplete-active");}}function closeAllLists(elmnt){var x=document.getElementsByClassName("autocomplete-items");for(var i=0;i<x.length;i++){if(elmnt!=x[i]&&elmnt!=input){x[i].parentNode.removeChild(x[i]);}}}document.addEventListener("click",function(e){closeAllLists(e.target);});}
+// https://vite.dev/config/
+export default defineConfig({
+  plugins: [react()],
+})
 
 --------
 
-#.\web\style.css
+#.\frontend\src\App.css
 
-/* Estilos Gerais */
 body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    background-color: #121212;
-    color: #e0e0e0;
-    margin: 0;
-    padding: 20px;
-}
-.container {
-    max-width: 95%;
-    margin: auto;
-}
-h1 {
-    text-align: center;
-    color: #bb86fc;
-    border-bottom: 2px solid #333;
-    padding-bottom: 10px;
-    margin-bottom: 20px;
+  background-color: #1a1a1a;
+  color: white;
+  font-family: sans-serif;
+  margin: 0;
 }
 
-/* Barra de Busca */
-.search-bar {
-    position: relative;
-    display: flex;
-    justify-content: center;
-    margin-bottom: 25px;
-    gap: 10px;
-}
-#search-input {
-    width: 50%;
-    padding: 10px 15px;
-    font-size: 1em;
-    border: 1px solid #555;
-    border-radius: 5px;
-    background-color: #2a2a2a;
-    color: #fff;
-}
-.search-bar button {
-    background-color: #bb86fc;
-    border: none;
-    color: #121212;
-    padding: 10px 20px;
-    border-radius: 5px;
-    cursor: pointer;
-    font-weight: bold;
-}
-#clear-button {
-    background-color: #444;
-    color: #fff;
+.App-header {
+  background-color: #242424;
+  padding: 1rem;
+  text-align: center;
+  border-bottom: 1px solid #444;
 }
 
-/* Autocomplete */
-.autocomplete-items {
-    position: absolute;
-    border: 1px solid #333;
-    border-top: none;
-    z-index: 99;
-    top: 100%;
-    left: 20.5%;
-    right: 20.5%;
-    max-height: 200px;
-    overflow-y: auto;
-}
-.autocomplete-items div {
-    padding: 10px;
-    cursor: pointer;
-    background-color: #2a2a2a;
-    border-bottom: 1px solid #333;
-    color: #fff;
-}
-.autocomplete-items div:hover {
-    background-color: #444;
-}
-.autocomplete-active {
-    background-color: #bb86fc !important;
-    color: #121212 !important;
+.main-content {
+  display: flex;
 }
 
-/* Galeria de Vídeos */
-.gallery-container {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-    gap: 25px;
+.sidebar {
+  width: 250px;
+  padding: 1rem;
+  border-right: 1px solid #444;
+  height: calc(100vh - 75px); /* Altura total menos o header */
+  overflow-y: auto;
 }
+
+.content {
+  flex-grow: 1;
+  padding: 1rem;
+}
+
+.folder-list ul {
+  list-style-type: none;
+  padding: 0;
+}
+
+.folder-list li {
+  background-color: #333;
+  margin-bottom: 0.5rem;
+  padding: 0.75rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.folder-list li:hover {
+  background-color: #4a4a4a;
+}
+
+.grid-placeholder {
+  color: #888;
+  font-style: italic;
+}
+
+/* Estilos para o VideoGrid e VideoCard */
+.video-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
 .video-card {
-    background-color: #1e1e1e;
-    border: 1px solid #333;
-    border-radius: 8px;
-    overflow: hidden;
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
-    display: flex;
-    flex-direction: column;
-}
-.video-card video {
-    width: 100%;
-    display: block;
-    background-color: #000;
-}
-.video-info {
-    padding: 10px 15px;
+  background-color: #242424;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #444;
 }
 
-/* [NOVO] Cabeçalho do Card (Título + Botão Próxima Cena) */
-.card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 8px; /* Espaço entre o header e as tags */
+.video-thumbnail {
+  background-color: #333;
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #888;
 }
-.card-header h3 {
-    margin: 0;
-    font-size: 1.1em;
-    color: #fff;
+
+.video-info {
+  padding: 0.75rem;
+}
+
+.video-title {
+  font-weight: bold;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin: 0 0 0.5rem 0;
+}
+
+.video-status {
+  font-size: 0.9em;
+  color: #ccc;
+  margin: 0;
+}
+
+.video-card button {
+    width: 100%;
+    padding: 8px;
+    margin-top: 8px;
+    background-color: #5f27cd;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.video-card button:disabled {
+    background-color: #333;
+    cursor: not-allowed;
+}
+.progress-bar {
+    background-color: #444;
+    padding: 8px;
+    margin-top: 8px;
+    border-radius: 4px;
+    text-align: center;
+    font-size: 0.9em;
+}
+
+.video-thumbnail img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover; /* Garante que a imagem cubra a área sem distorcer */
+}
+
+.video-card {
+  /* Adicione isso para o cursor indicar que é clicável */
+  cursor: pointer;
+}
+
+.App-header nav {
+  margin-top: 1rem;
+}
+
+.App-header nav a {
+  color: white;
+  text-decoration: none;
+  margin: 0 1rem;
+  padding: 0.5rem;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+}
+
+.App-header nav a:hover {
+  background-color: #444;
+}
+
+--------
+
+#.\frontend\src\index.css
+
+:root {
+  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: light dark;
+  color: rgba(255, 255, 255, 0.87);
+  background-color: #242424;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  font-weight: 500;
+  color: #646cff;
+  text-decoration: inherit;
+}
+a:hover {
+  color: #535bf2;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  place-items: center;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+h1 {
+  font-size: 3.2em;
+  line-height: 1.1;
+}
+
+button {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  background-color: #1a1a1a;
+  cursor: pointer;
+  transition: border-color 0.25s;
+}
+button:hover {
+  border-color: #646cff;
+}
+button:focus,
+button:focus-visible {
+  outline: 4px auto -webkit-focus-ring-color;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color: #213547;
+    background-color: #ffffff;
+  }
+  a:hover {
+    color: #747bff;
+  }
+  button {
+    background-color: #f9f9f9;
+  }
+}
+
+--------
+
+#.\frontend\src\components\PlayerModal.css
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background-color: #242424;
+  padding: 20px;
+  border-radius: 8px;
+  position: relative;
+  width: 80%;
+  max-width: 900px;
+}
+
+.close-button {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background: none;
+  border: none;
+  color: white;
+  font-size: 1.5rem;
+  cursor: pointer;
+}
+
+.player-wrapper {
+  position: relative;
+  padding-top: 56.25%; /* 16:9 Aspect Ratio */
+}
+
+.react-player {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+--------
+
+#.\frontend\src\components\SceneProgressBar.css
+
+.progress-bar-container {
+  width: 100%;
+  height: 20px;
+  background-color: #333;
+  display: flex;
+  position: relative;
+  cursor: pointer;
+  margin-top: 10px;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.scene-segment {
+  height: 100%;
+  transition: filter 0.2s ease-in-out;
+}
+
+.scene-segment:hover {
+  filter: brightness(1.3);
+}
+
+.playhead {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 3px;
+  height: 100%;
+  background-color: white;
+  transform: translateX(-50%); /* Centraliza o pino */
+  pointer-events: none; /* Garante que o clique passe para a barra abaixo */
+}
+
+.scene-segment.dimmed {
+  opacity: 0.4;
+}
+
+--------
+
+#.\frontend\src\pages\SearchPage.css
+
+.search-page {
+  padding: 1rem;
+}
+
+.search-form {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 2rem;
+  flex-wrap: wrap;
+}
+
+.search-form input {
+  padding: 0.75rem;
+  border-radius: 6px;
+  border: 1px solid #444;
+  background-color: #242424;
+  color: white;
+  font-size: 1em;
+  flex-grow: 1;
+}
+
+.search-form button {
+  padding: 0.75rem 1.5rem;
+  border: none;
+  border-radius: 6px;
+  background-color: #5f27cd;
+  color: white;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+.search-form button:disabled {
+  background-color: #333;
+  cursor: not-allowed;
+}
+
+.search-results-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 1rem;
+}
+
+.clip-card {
+  background-color: #242424;
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+}
+
+.clip-card video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.clip-info {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+  padding: 0.5rem;
+  color: white;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.clip-title {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    flex-grow: 1;
-}
-.next-scene-btn {
-    background-color: #3a3b3c;
-    color: #e4e6eb;
-    border: 1px solid #555;
-    padding: 5px 12px;
-    border-radius: 5px;
-    cursor: pointer;
-    font-weight: bold;
-    font-size: 0.8em;
-    white-space: nowrap;
-    transition: background-color 0.2s;
-    flex-shrink: 0; /* Impede que o botão encolha */
-}
-.next-scene-btn:hover {
-    background-color: #4e4f50;
+    margin-right: 1rem;
 }
 
-/* Barra de Cenas Customizada */
-.custom-progress-bar-container {
-    position: relative;
-    width: 100%;
-    height: 15px;
-    cursor: pointer;
-    background-color: #333;
-}
-.scene-progress-bar {
-    display: flex;
-    width: 100%;
-    height: 100%;
-}
-.scene-segment {
-    height: 100%;
-    transition: opacity 0.3s ease-in-out;
-}
-.scene-segment.faded {
-    opacity: 0.2;
-}
-.scene-segment:not(.faded):hover {
-    filter: brightness(1.2);
-    transform: scaleY(1.1);
-}
-.playhead {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 2px;
-    height: 100%;
-    background-color: rgba(255, 255, 255, 0.8);
-    pointer-events: none;
-}
+--------
 
-/* Tags Interativas */
-.tags-container {
-    padding-top: 8px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    max-height: 4.2em; 
-    overflow-y: auto;  
-    padding-right: 5px; 
-}
-.tag {
-    background-color: #3a3b3c;
-    color: #e4e6eb;
-    padding: 4px 10px;
-    border-radius: 12px;
-    font-size: 0.85em;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background-color 0.2s, color 0.2s;
-    border: 1px solid transparent;
-}
-.tag:hover {
-    background-color: #4e4f50;
-}
-.tag.active {
-    background-color: #bb86fc;
-    color: #121212;
-    border-color: #fff;
-}
+#.\services\video_scanner.py
 
-/* Barra de Rolagem das Tags */
-.tags-container::-webkit-scrollbar { width: 8px; }
-.tags-container::-webkit-scrollbar-track { background: #2a2a2a; border-radius: 4px; }
-.tags-container::-webkit-scrollbar-thumb { background-color: #555; border-radius: 4px; border: 2px solid #2a2a2a; }
-.tags-container::-webkit-scrollbar-thumb:hover { background-color: #777; }
+# services/video_scanner.py
 
-/* Paginação */
-.pagination {
-    text-align: center;
-    margin-top: 30px;
-}
-.pagination button {
-    background-color: #bb86fc;
-    border: none;
-    color: #121212;
-    padding: 10px 20px;
-    margin: 0 10px;
-    border-radius: 5px;
-    cursor: pointer;
-    font-weight: bold;
-    transition: background-color 0.2s;
-}
-.pagination button:hover {
-    background-color: #9f52f7;
-}
-.pagination button:disabled {
-    background-color: #555;
-    cursor: not-allowed;
-}
-#page-info {
-    font-size: 1.1em;
-    vertical-align: middle;
-}
+import os
+from typing import Dict, List, Any
 
-.unprocessed-card {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    min-height: 215px; /* Altura aproximada de um player de vídeo */
-    background-color: #2a2a2a;
-    position: relative;
-    overflow: hidden;
-}
+class VideoScanner:
+    """
+    Responsável por escanear um diretório em busca de arquivos de vídeo
+    organizados em subpastas.
+    """
+    VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv']
 
-.unprocessed-card .video-thumbnail {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    filter: brightness(0.4) blur(2px);
-    position: absolute;
-    top: 0;
-    left: 0;
-}
+    def __init__(self, root_path: str):
+        if not os.path.isdir(root_path):
+            raise FileNotFoundError(f"O diretório raiz especificado não existe: {root_path}")
+        self.root_path = root_path
 
-.process-btn {
-    background-color: #bb86fc;
-    color: #121212;
-    border: 2px solid rgba(255, 255, 255, 0.8);
-    padding: 12px 25px;
-    font-size: 1.1em;
-    font-weight: bold;
-    border-radius: 8px;
-    cursor: pointer;
-    z-index: 2;
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
-}
+    def scan(self) -> Dict[str, List[Dict[str, str]]]:
+        """
+        Executa o escaneamento e retorna um dicionário com os dados dos vídeos.
+        Formato: {'Nome da Atriz': [{'name': 'Nome do Video', 'path': 'caminho/completo'}]}
+        """
+        video_data = {}
+        
+        try:
+            # Lista as pastas (atrizes) dentro do diretório raiz
+            actress_folders = [d for d in os.listdir(self.root_path) if os.path.isdir(os.path.join(self.root_path, d))]
 
-.process-btn:hover {
-    transform: scale(1.05);
-    box-shadow: 0 0 15px rgba(187, 134, 252, 0.7);
-}
+            for actress in sorted(actress_folders): # Ordena para consistência
+                actress_path = os.path.join(self.root_path, actress)
+                videos = []
+                
+                # Lista os arquivos dentro da pasta da atriz
+                for filename in sorted(os.listdir(actress_path)):
+                    if any(filename.lower().endswith(ext) for ext in self.VIDEO_EXTENSIONS):
+                        video_info = {
+                            "name": os.path.splitext(filename)[0],
+                            "path": os.path.join(actress_path, filename)
+                        }
+                        videos.append(video_info)
+                
+                if videos:
+                    video_data[actress] = videos
+                    
+        except Exception as e:
+            print(f"Ocorreu um erro ao escanear a pasta: {e}")
+            return {} # Retorna um objeto vazio em caso de erro
 
-/* --- [NOVO] Estilos para o Feedback de Processamento --- */
-.processing-overlay {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background-color: rgba(0, 0, 0, 0.8);
-    backdrop-filter: blur(5px);
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
-    color: #fff;
-    z-index: 3;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.3s ease;
-}
-
-.processing-overlay.visible {
-    opacity: 1;
-    pointer-events: all;
-}
-
-.processing-overlay p {
-    margin-top: 15px;
-    font-size: 1.1em;
-}
-
-.progress-bar-container {
-    width: 80%;
-    height: 20px;
-    background-color: #333;
-    border-radius: 10px;
-    overflow: hidden;
-    border: 1px solid #555;
-}
-
-.progress-bar-fill {
-    width: 0%;
-    height: 100%;
-    background-color: #bb86fc;
-    border-radius: 10px;
-    transition: width 0.2s ease-out;
-}
+        return video_data
 
 --------
 

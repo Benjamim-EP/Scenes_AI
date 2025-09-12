@@ -29,3 +29,7 @@
   transform: translateX(-50%); /* Centraliza o pino */
   pointer-events: none; /* Garante que o clique passe para a barra abaixo */
 }
+
+.scene-segment.dimmed {
+  opacity: 0.4;
+}

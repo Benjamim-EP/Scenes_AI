@@ -1,9 +1,12 @@
 import os
 
 # extensões que você quer juntar
-EXTENSOES = {".hml", ".py", ".js", ".css"}
+EXTENSOES = {".html", ".py", ".js", ".css"}
 
-# pasta base (troque se precisar)
+# pastas que você quer ignorar
+IGNORAR_PASTAS = {"venv", "__pycache__", "node_modules"}
+
+# pasta base
 PASTA_BASE = "."
 
 # arquivo final
@@ -12,7 +15,13 @@ ARQUIVO_SAIDA = "arquivos_concatenados.txt"
 
 def concatenar_arquivos(pasta_base, arquivo_saida):
     with open(arquivo_saida, "w", encoding="utf-8") as saida:
-        for root, _, files in os.walk(pasta_base):
+        for root, dirs, files in os.walk(pasta_base):
+            # remove pastas que não devem ser exploradas
+            dirs[:] = [
+                d for d in dirs
+                if d not in IGNORAR_PASTAS and not d.startswith(".")
+            ]
+
             for file in files:
                 _, ext = os.path.splitext(file)
                 if ext.lower() in EXTENSOES:

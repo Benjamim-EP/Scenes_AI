@@ -126,3 +126,20 @@ body {
   /* Adicione isso para o cursor indicar que é clicável */
   cursor: pointer;
 }
+
+.App-header nav {
+  margin-top: 1rem;
+}
+
+.App-header nav a {
+  color: white;
+  text-decoration: none;
+  margin: 0 1rem;
+  padding: 0.5rem;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+}
+
+.App-header nav a:hover {
+  background-color: #444;
+}

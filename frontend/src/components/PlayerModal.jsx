@@ -1,47 +1,47 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react'; // [CORRIGIDO] Adicionado useState, useEffect, useRef
 import axios from 'axios';
-import SceneProgressBar from './SceneProgressBar'; // A barra de cenas que criamos
+import SceneProgressBar from './SceneProgressBar';
 import './PlayerModal.css';
 
 const API_URL = 'http://localhost:8000/api';
 
 function PlayerModal({ video, onClose }) {
-  const videoRef = useRef(null); // Referência para o elemento <video>
+  const videoRef = useRef(null);
   const [scenes, setScenes] = useState([]);
   const [videoDuration, setVideoDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
 
+  // Pega a lista de IDs de cenas correspondentes, se a prop 'video' as tiver
+  const matchingSceneIds = video?.matching_scene_ids || [];
+
   const videoUrl = video ? `${API_URL}/stream/${encodeURIComponent(video.folder)}/${encodeURIComponent(video.filename)}` : null;
 
-  // Efeito para buscar os dados das cenas quando o vídeo muda
   useEffect(() => {
-    if (video && video.has_scenes_json) { // Só busca se o vídeo foi processado
+    // Limpa os dados antigos sempre que um novo vídeo é selecionado
+    setScenes([]);
+    setVideoDuration(0);
+    setCurrentTime(0);
+
+    if (video && video.has_scenes_json) {
       const fetchSceneData = async () => {
         try {
           const response = await axios.get(`${API_URL}/scenes/${video.folder}/${video.filename}`);
           setScenes(response.data.scenes);
-          // Usaremos a duração do vídeo real em vez da do JSON para mais precisão
         } catch (error) {
           console.error("Erro ao buscar dados das cenas:", error);
           setScenes([]);
         }
       };
       fetchSceneData();
-    } else {
-      // Limpa os dados se não houver vídeo ou JSON
-      setScenes([]);
     }
   }, [video]); // Re-executa quando o 'video' prop muda
 
-  // Função para ser chamada pela barra de progresso
   const handleSeek = (percentage) => {
     if (videoRef.current) {
-      const seekTime = videoRef.current.duration * percentage;
-      videoRef.current.currentTime = seekTime;
+      videoRef.current.currentTime = videoRef.current.duration * percentage;
     }
   };
 
-  // Callback para quando os metadados do vídeo (incluindo duração) são carregados
   const handleLoadedMetadata = () => {
     if (videoRef.current) {
       setVideoDuration(videoRef.current.duration);
@@ -51,7 +51,6 @@ function PlayerModal({ video, onClose }) {
     }
   };
 
-  // Callback para atualizar o tempo atual enquanto o vídeo toca
   const handleTimeUpdate = () => {
     if (videoRef.current) {
       setCurrentTime(videoRef.current.currentTime);
@@ -74,8 +73,8 @@ function PlayerModal({ video, onClose }) {
               width="100%"
               height="100%"
               preload="auto"
-              onLoadedMetadata={handleLoadedMetadata} // Pega a duração quando o vídeo carrega
-              onTimeUpdate={handleTimeUpdate}     // Atualiza o tempo enquanto toca
+              onLoadedMetadata={handleLoadedMetadata}
+              onTimeUpdate={handleTimeUpdate}
               style={{ position: 'absolute', top: 0, left: 0, backgroundColor: 'black' }}
             >
               <source src={videoUrl} type="video/mp4" />
@@ -84,12 +83,12 @@ function PlayerModal({ video, onClose }) {
           )}
         </div>
         
-        {/* Renderiza a barra de cenas, passando os dados necessários */}
         <SceneProgressBar
           scenes={scenes}
           duration={videoDuration}
           currentTime={currentTime}
           onSeek={handleSeek}
+          highlightedSceneIds={matchingSceneIds}
         />
       </div>
     </div>
