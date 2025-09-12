@@ -1,7 +1,7 @@
 import os
 
 # extensões que você quer juntar
-EXTENSOES = {".html", ".py", ".js", ".css"}
+EXTENSOES = {".html", ".py", ".js", ".jsx", ".css"}
 
 # pastas que você quer ignorar
 IGNORAR_PASTAS = {"venv", "__pycache__", "node_modules"}

@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import axios from 'axios';
-import VideoCard from '../components/VideoCard'; // Importa o componente reutilizável
+import VideoCard from '../components/VideoCard'; // Importa nosso componente reutilizável
 import './SearchPage.css';
 
 const API_URL = 'http://localhost:8000/api';
 
-function SearchPage({ onVideoSelect }) {
+function SearchPage({ onVideoSelect }) { // Recebe onVideoSelect do App.jsx
   const [includeTags, setIncludeTags] = useState('');
   const [excludeTags, setExcludeTags] = useState('');
   const [minDuration, setMinDuration] = useState('');
@@ -28,6 +28,7 @@ function SearchPage({ onVideoSelect }) {
     };
 
     try {
+      // O endpoint correto é /search, não /search_videos
       const response = await axios.post(`${API_URL}/search`, payload);
       setSearchResults(response.data.results);
     } catch (err) {
@@ -54,8 +55,10 @@ function SearchPage({ onVideoSelect }) {
           <VideoCard 
             key={video.video_id} 
             video={video}
+            // [A CORREÇÃO ESTÁ AQUI] Passamos a função onVideoSelect para o VideoCard
             onVideoSelect={onVideoSelect} 
           >
+            {/* O conteúdo que vai dentro do card, específico para a página de busca */}
             <p className="video-status">{video.match_count} cena(s) encontrada(s)</p>
           </VideoCard>
         ))}

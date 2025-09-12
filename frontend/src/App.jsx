@@ -1,4 +1,3 @@
-// frontend/src/App.jsx
 import React, { useState } from 'react';
 import { Routes, Route, Link } from 'react-router-dom';
 import PlayerModal from './components/PlayerModal';
@@ -13,7 +12,10 @@ function App() {
   const handleProcessingComplete = () => {
     setTimeout(() => setReloadKey(prev => prev + 1), 1500);
   };
+  
+  // Esta é a função que precisamos passar para ambas as páginas
   const handleVideoSelect = (video) => setPlayingVideo(video);
+  
   const handleClosePlayer = () => setPlayingVideo(null);
 
   return (
@@ -37,7 +39,11 @@ function App() {
             />
           }
         />
-        <Route path="/search" element={<SearchPage />} />
+        {/* [A CORREÇÃO ESTÁ AQUI] Passamos a função onVideoSelect para a SearchPage */}
+        <Route 
+          path="/search" 
+          element={<SearchPage onVideoSelect={handleVideoSelect} />} 
+        />
       </Routes>
       
       <PlayerModal video={playingVideo} onClose={handleClosePlayer} />

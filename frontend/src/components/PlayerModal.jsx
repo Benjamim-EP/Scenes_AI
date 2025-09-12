@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'; // [CORRIGIDO] Adicionado useState, useEffect, useRef
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import SceneProgressBar from './SceneProgressBar';
 import './PlayerModal.css';
@@ -7,44 +7,44 @@ const API_URL = 'http://localhost:8000/api';
 
 function PlayerModal({ video, onClose }) {
   const videoRef = useRef(null);
-  const [scenes, setScenes] = useState([]);
-  const [videoDuration, setVideoDuration] = useState(0);
+  const [sceneData, setSceneData] = useState({ scenes: [], duration: 0 });
   const [currentTime, setCurrentTime] = useState(0);
 
-  // Pega a lista de IDs de cenas correspondentes, se a prop 'video' as tiver
   const matchingSceneIds = video?.matching_scene_ids || [];
-
   const videoUrl = video ? `${API_URL}/stream/${encodeURIComponent(video.folder)}/${encodeURIComponent(video.filename)}` : null;
 
   useEffect(() => {
-    // Limpa os dados antigos sempre que um novo vídeo é selecionado
-    setScenes([]);
-    setVideoDuration(0);
+    setSceneData({ scenes: [], duration: 0 });
     setCurrentTime(0);
 
-    if (video && video.has_scenes_json) {
+    // [A CORREÇÃO] A condição agora é mais simples: se temos um vídeo, tentamos buscar as cenas.
+    // A API retornará uma lista vazia se o JSON não existir, o que é um comportamento seguro.
+    if (video) { 
       const fetchSceneData = async () => {
         try {
           const response = await axios.get(`${API_URL}/scenes/${video.folder}/${video.filename}`);
-          setScenes(response.data.scenes);
+          setSceneData({
+            scenes: response.data.scenes || [],
+            duration: response.data.duration || 0
+          });
         } catch (error) {
           console.error("Erro ao buscar dados das cenas:", error);
-          setScenes([]);
+          setSceneData({ scenes: [], duration: 0 });
         }
       };
       fetchSceneData();
     }
-  }, [video]); // Re-executa quando o 'video' prop muda
+  }, [video]);
 
+  // ... (o resto do código: handleSeek, handleLoadedMetadata, etc. permanece igual)
   const handleSeek = (percentage) => {
     if (videoRef.current) {
-      videoRef.current.currentTime = videoRef.current.duration * percentage;
+      videoRef.current.currentTime = sceneData.duration * percentage;
     }
   };
 
   const handleLoadedMetadata = () => {
     if (videoRef.current) {
-      setVideoDuration(videoRef.current.duration);
       videoRef.current.play().catch(error => {
         console.log("Autoplay impedido pelo navegador:", error);
       });
@@ -84,8 +84,8 @@ function PlayerModal({ video, onClose }) {
         </div>
         
         <SceneProgressBar
-          scenes={scenes}
-          duration={videoDuration}
+          scenes={sceneData.scenes}
+          duration={sceneData.duration}
           currentTime={currentTime}
           onSeek={handleSeek}
           highlightedSceneIds={matchingSceneIds}

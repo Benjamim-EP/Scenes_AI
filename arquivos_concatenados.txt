@@ -3,10 +3,10 @@
 import os
 
 # extensões que você quer juntar
-EXTENSOES = {".html", ".py", ".js", ".css"}
+EXTENSOES = {".html", ".py", ".js", ".jsx", ".css"}
 
 # pastas que você quer ignorar
-IGNORAR_PASTAS = {"venv", "__pycache__",'node_modules'}
+IGNORAR_PASTAS = {"venv", "__pycache__", "node_modules"}
 
 # pasta base
 PASTA_BASE = "."
@@ -353,6 +353,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.core.schemas import SearchRequest
 from pathlib import Path
 import json
+import os
 
 router = APIRouter()
 
@@ -367,8 +368,8 @@ def get_db():
     finally:
         db.close()
 
-@router.post("/search_videos", tags=["Search"], summary="Busca vídeos que contêm cenas com critérios específicos")
-def search_videos_with_matching_scenes(request: SearchRequest, db: sqlite3.Connection = Depends(get_db)):
+@router.post("/search", tags=["Search"], summary="Busca vídeos que contêm cenas com critérios específicos")
+def search_videos(request: SearchRequest, db: sqlite3.Connection = Depends(get_db)):
     """
     Busca vídeos e retorna uma lista de vídeos que contêm pelo menos uma cena
     que corresponde aos critérios de busca. A resposta inclui os IDs das cenas correspondentes.
@@ -378,34 +379,29 @@ def search_videos_with_matching_scenes(request: SearchRequest, db: sqlite3.Conne
     subquery_conditions = []
     subquery_params = []
     
-    # Duração
-    if request.min_duration is not None:
+    if request.min_duration is not None and request.min_duration > 0:
         subquery_conditions.append("s.duration >= ?")
         subquery_params.append(request.min_duration)
-    if request.max_duration is not None:
+    if request.max_duration is not None and request.max_duration > 0:
         subquery_conditions.append("s.duration <= ?")
         subquery_params.append(request.max_duration)
         
-    # Exclusão de tags
     if request.exclude_tags:
         for tag in request.exclude_tags:
-            subquery_conditions.append(f"""
-            s.scene_id NOT IN (
-                SELECT st_exclude.scene_id FROM scene_tags st_exclude
-                JOIN tags t_exclude ON st_exclude.tag_id = t_exclude.tag_id
-                WHERE t_exclude.tag_name = ?
-            )""")
+            subquery_conditions.append(f"s.scene_id NOT IN (SELECT st.scene_id FROM scene_tags st JOIN tags t ON st.tag_id = t.tag_id WHERE t.tag_name = ?)")
             subquery_params.append(tag)
     
-    # Construção da subquery
     subquery_where = " AND ".join(subquery_conditions) if subquery_conditions else "1=1"
     
-    # Inclusão de tags (GROUP BY / HAVING)
+    subquery_from_joins = "FROM scenes s"
     subquery_having = ""
     if request.include_tags:
+        subquery_from_joins += " JOIN scene_tags st ON s.scene_id = st.scene_id JOIN tags t ON st.tag_id = t.tag_id"
         placeholders = ', '.join('?' for _ in request.include_tags)
-        subquery_having = f"GROUP BY s.scene_id HAVING COUNT(DISTINCT t.tag_name) = ?"
+        # Adiciona a condição de tag ao WHERE, não ao HAVING, para performance
+        subquery_where += f" AND t.tag_name IN ({placeholders})"
         subquery_params.extend(request.include_tags)
+        subquery_having = f"GROUP BY s.scene_id HAVING COUNT(DISTINCT t.tag_name) = ?"
         subquery_params.append(len(request.include_tags))
 
     # --- Query Principal para agrupar por vídeo ---
@@ -414,40 +410,39 @@ def search_videos_with_matching_scenes(request: SearchRequest, db: sqlite3.Conne
         v.video_id,
         v.video_name,
         v.file_path,
-        json_group_array(DISTINCT s_match.scene_id) as matching_scene_ids
+        json_group_array(DISTINCT s_match.scene_id) as matching_scene_ids,
+        COUNT(DISTINCT s_match.scene_id) as match_count
     FROM videos v
     JOIN scenes s_match ON v.video_id = s_match.video_id
     WHERE s_match.scene_id IN (
-        -- A subquery encontra as cenas correspondentes
-        SELECT s.scene_id
-        FROM scenes s
-        JOIN scene_tags st ON s.scene_id = st.scene_id
-        JOIN tags t ON st.tag_id = t.tag_id
-        WHERE {subquery_where}
-        {subquery_having}
+        SELECT s.scene_id {subquery_from_joins} WHERE {subquery_where} {subquery_having}
     )
     GROUP BY v.video_id
+    ORDER BY match_count DESC
+    LIMIT ? OFFSET ?
     """
     
-    # Paginação (opcional para vídeos, mas boa prática)
-    # query += " LIMIT ? OFFSET ?"
-    # params.extend([request.limit, (request.page - 1) * request.limit])
+    final_params = subquery_params + [request.limit, (request.page - 1) * request.limit]
 
     try:
         cursor = db.cursor()
-        print(f"Executando query: {query}")
-        print(f"Com parâmetros: {subquery_params}")
-        results = cursor.execute(query, subquery_params).fetchall()
+        results = cursor.execute(query, final_params).fetchall()
 
         videos = []
         for row in results:
             video = dict(row)
-            # Deserializa a string JSON dos IDs
             video['matching_scene_ids'] = json.loads(video['matching_scene_ids'])
+            
+            # [CORREÇÃO CRUCIAL] Analisa o file_path para extrair folder e filename
+            path_obj = Path(video['file_path'])
+            video['filename'] = path_obj.name
+            video['folder'] = path_obj.parent.name
+            
             videos.append(video)
         
         return {"results": videos}
     except sqlite3.Error as e:
+        print(f"Erro no banco de dados: {e}")
         raise HTTPException(status_code=500, detail=f"Erro no banco de dados: {e}")
 
 --------
@@ -1181,6 +1176,59 @@ body {
 
 --------
 
+#.\frontend\src\App.jsx
+
+// frontend/src/App.jsx
+import React, { useState } from 'react';
+import { Routes, Route, Link } from 'react-router-dom';
+import PlayerModal from './components/PlayerModal';
+import BrowserPage from './pages/BrowserPage';
+import SearchPage from './pages/SearchPage';
+import './App.css';
+
+function App() {
+  const [reloadKey, setReloadKey] = useState(0);
+  const [playingVideo, setPlayingVideo] = useState(null);
+
+  const handleProcessingComplete = () => {
+    setTimeout(() => setReloadKey(prev => prev + 1), 1500);
+  };
+  const handleVideoSelect = (video) => setPlayingVideo(video);
+  const handleClosePlayer = () => setPlayingVideo(null);
+
+  return (
+    <div className="App">
+      <header className="App-header">
+        <h1>Video Scene Browser</h1>
+        <nav>
+          <Link to="/">Navegador</Link>
+          <Link to="/search">Buscar Cenas</Link>
+        </nav>
+      </header>
+      
+      <Routes>
+        <Route
+          path="/"
+          element={
+            <BrowserPage
+              onProcessingComplete={handleProcessingComplete}
+              onVideoSelect={handleVideoSelect}
+              reloadKey={reloadKey}
+            />
+          }
+        />
+        <Route path="/search" element={<SearchPage />} />
+      </Routes>
+      
+      <PlayerModal video={playingVideo} onClose={handleClosePlayer} />
+    </div>
+  );
+}
+
+export default App;
+
+--------
+
 #.\frontend\src\index.css
 
 :root {
@@ -1254,6 +1302,87 @@ button:focus-visible {
 
 --------
 
+#.\frontend\src\main.jsx
+
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { BrowserRouter } from 'react-router-dom'; // 1. Importe o BrowserRouter
+import App from './App.jsx';
+import './index.css';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    {/* 2. Envolva o App com o BrowserRouter */}
+    <BrowserRouter>
+      <App />
+    </BrowserRouter>
+  </React.StrictMode>,
+);
+
+--------
+
+#.\frontend\src\components\FolderList.jsx
+
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+
+const API_URL = 'http://localhost:8000/api';
+
+// O componente recebe 'props' e desestruturamos para pegar onFolderSelect
+function FolderList({ onFolderSelect }) {
+  const [folders, setFolders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    const fetchFolders = async () => {
+      try {
+        setLoading(true);
+        const response = await axios.get(`${API_URL}/folders`);
+        setFolders(response.data.folders);
+        setError(null);
+      } catch (err) {
+        setError('Erro ao buscar as pastas. O backend está rodando?');
+        console.error(err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchFolders();
+  }, []);
+
+  if (loading) return <p>Carregando pastas...</p>;
+  if (error) return <p style={{ color: 'red' }}>{error}</p>;
+
+  return (
+    <div className="folder-list">
+      <h2>Estúdios / Atrizes</h2>
+      <ul>
+        {folders.map(folder => (
+          // O onClick chama a função que recebemos via props
+          // Adicionamos uma verificação para garantir que é uma função antes de chamar
+          <li 
+            key={folder} 
+            onClick={() => {
+              if (typeof onFolderSelect === 'function') {
+                onFolderSelect(folder);
+              } else {
+                console.error("onFolderSelect não é uma função!", onFolderSelect);
+              }
+            }}
+          >
+            {folder}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+export default FolderList;
+
+--------
+
 #.\frontend\src\components\PlayerModal.css
 
 .modal-overlay {
@@ -1302,6 +1431,109 @@ button:focus-visible {
 
 --------
 
+#.\frontend\src\components\PlayerModal.jsx
+
+import React, { useState, useEffect, useRef } from 'react'; // [CORRIGIDO] Adicionado useState, useEffect, useRef
+import axios from 'axios';
+import SceneProgressBar from './SceneProgressBar';
+import './PlayerModal.css';
+
+const API_URL = 'http://localhost:8000/api';
+
+function PlayerModal({ video, onClose }) {
+  const videoRef = useRef(null);
+  const [scenes, setScenes] = useState([]);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+
+  // Pega a lista de IDs de cenas correspondentes, se a prop 'video' as tiver
+  const matchingSceneIds = video?.matching_scene_ids || [];
+
+  const videoUrl = video ? `${API_URL}/stream/${encodeURIComponent(video.folder)}/${encodeURIComponent(video.filename)}` : null;
+
+  useEffect(() => {
+    // Limpa os dados antigos sempre que um novo vídeo é selecionado
+    setScenes([]);
+    setVideoDuration(0);
+    setCurrentTime(0);
+
+    if (video && video.has_scenes_json) {
+      const fetchSceneData = async () => {
+        try {
+          const response = await axios.get(`${API_URL}/scenes/${video.folder}/${video.filename}`);
+          setScenes(response.data.scenes);
+        } catch (error) {
+          console.error("Erro ao buscar dados das cenas:", error);
+          setScenes([]);
+        }
+      };
+      fetchSceneData();
+    }
+  }, [video]); // Re-executa quando o 'video' prop muda
+
+  const handleSeek = (percentage) => {
+    if (videoRef.current) {
+      videoRef.current.currentTime = videoRef.current.duration * percentage;
+    }
+  };
+
+  const handleLoadedMetadata = () => {
+    if (videoRef.current) {
+      setVideoDuration(videoRef.current.duration);
+      videoRef.current.play().catch(error => {
+        console.log("Autoplay impedido pelo navegador:", error);
+      });
+    }
+  };
+
+  const handleTimeUpdate = () => {
+    if (videoRef.current) {
+      setCurrentTime(videoRef.current.currentTime);
+    }
+  };
+  
+  if (!video) return null;
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <button className="close-button" onClick={onClose}>×</button>
+        <h3>{video.filename}</h3>
+        <div className="player-wrapper">
+          {videoUrl && (
+            <video
+              ref={videoRef}
+              key={videoUrl}
+              controls
+              width="100%"
+              height="100%"
+              preload="auto"
+              onLoadedMetadata={handleLoadedMetadata}
+              onTimeUpdate={handleTimeUpdate}
+              style={{ position: 'absolute', top: 0, left: 0, backgroundColor: 'black' }}
+            >
+              <source src={videoUrl} type="video/mp4" />
+              Seu navegador não suporta a tag de vídeo.
+            </video>
+          )}
+        </div>
+        
+        <SceneProgressBar
+          scenes={scenes}
+          duration={videoDuration}
+          currentTime={currentTime}
+          onSeek={handleSeek}
+          highlightedSceneIds={matchingSceneIds}
+        />
+      </div>
+    </div>
+  );
+}
+
+export default PlayerModal;
+
+--------
+
 #.\frontend\src\components\SceneProgressBar.css
 
 .progress-bar-container {
@@ -1339,6 +1571,234 @@ button:focus-visible {
 .scene-segment.dimmed {
   opacity: 0.4;
 }
+
+--------
+
+#.\frontend\src\components\SceneProgressBar.jsx
+
+import React from 'react';
+import './SceneProgressBar.css';
+
+const getColorForScene = (index) => {
+  const colors = ['#3498db', '#e74c3c', '#2ecc71', '#f1c40f', '#9b59b6', '#1abc9c', '#e67e22'];
+  return colors[index % colors.length];
+};
+
+// [CORRIGIDO] Adicionamos um valor padrão para a prop 'highlightedSceneIds'
+function SceneProgressBar({ scenes, duration, currentTime, onSeek, highlightedSceneIds = [] }) {
+  if (!scenes || scenes.length === 0 || duration === 0) {
+    return null;
+  }
+
+  const playheadPosition = (currentTime / duration) * 100;
+
+  const handleBarClick = (e) => {
+    const bar = e.currentTarget;
+    const rect = bar.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const width = bar.offsetWidth;
+    const seekPercentage = clickX / width;
+    
+    onSeek(seekPercentage);
+  };
+
+  return (
+    <div className="progress-bar-container" onClick={handleBarClick}>
+      {scenes.map((scene, index) => {
+        const sceneWidth = (scene.duration / duration) * 100;
+        
+        // [CORRIGIDO] A lógica de destaque agora funciona de forma segura
+        // Se 'highlightedSceneIds' estiver vazio, 'isHighlighted' será sempre false.
+        const isHighlighted = highlightedSceneIds.length > 0 ? highlightedSceneIds.includes(scene.scene_number || scene.cena_n) : true;
+
+        return (
+          <div
+            key={scene.scene_number || scene.cena_n}
+            className={`scene-segment ${isHighlighted ? 'highlighted' : 'dimmed'}`}
+            style={{
+              width: `${sceneWidth}%`,
+              backgroundColor: isHighlighted ? getColorForScene(index) : '#555',
+            }}
+            title={`Cena ${scene.scene_number || scene.cena_n} (${scene.start_time.toFixed(1)}s - ${scene.end_time.toFixed(1)}s)`}
+          />
+        );
+      })}
+      <div className="playhead" style={{ left: `${playheadPosition}%` }} />
+    </div>
+  );
+}
+
+export default SceneProgressBar;
+
+--------
+
+#.\frontend\src\components\VideoCard.jsx
+
+import React from 'react';
+
+const API_URL = 'http://localhost:8000/api';
+
+function VideoCard({ video, onVideoSelect, children }) {
+  // A URL da thumbnail é construída a partir dos dados do vídeo
+  const thumbnailUrl = `${API_URL}/thumbnail/${encodeURIComponent(video.folder)}/${encodeURIComponent(video.filename)}`;
+
+  return (
+    // O onClick agora chama a função recebida via props
+    <div className="video-card" onClick={() => onVideoSelect(video)}>
+      <div className="video-thumbnail">
+        <img src={thumbnailUrl} alt={video.filename} loading="lazy" />
+      </div>
+      <div className="video-info">
+        <p className="video-title" title={video.filename}>{video.filename}</p>
+        {/* 'children' permite que cada página insira seu próprio conteúdo de status */}
+        {children}
+      </div>
+    </div>
+  );
+}
+
+export default VideoCard;
+
+--------
+
+#.\frontend\src\components\VideoGrid.jsx
+
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import VideoCard from './VideoCard'; // Importa o componente reutilizável
+
+const API_URL = 'http://localhost:8000/api';
+const WS_URL = 'ws://localhost:8000/api/ws/progress';
+
+// Componente para o conteúdo específico do card no modo Browser
+function BrowserCardContent({ video, onProcessingComplete }) {
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [progressMessage, setProgressMessage] = useState("");
+
+  const handleProcessClick = async (e) => {
+    e.stopPropagation();
+    setIsProcessing(true);
+    setProgressMessage("Iniciando...");
+    try {
+      const response = await axios.post(`${API_URL}/process/${video.folder}/${video.filename}`);
+      const { job_id } = response.data;
+      const ws = new WebSocket(`${WS_URL}/${job_id}`);
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        setProgressMessage(`${data.message} (${data.progress || 0}%)`);
+        if (data.status === 'completed' || data.status === 'error') ws.close();
+      };
+      ws.onclose = () => {
+        setIsProcessing(false);
+        if (typeof onProcessingComplete === 'function') onProcessingComplete();
+      };
+      ws.onerror = () => {
+         setProgressMessage("Erro de conexão!");
+         setIsProcessing(false);
+         if (typeof onProcessingComplete === 'function') onProcessingComplete();
+      }
+    } catch (err) {
+      setProgressMessage("Falha ao iniciar!");
+      setIsProcessing(false);
+    }
+  };
+  
+  const statusIcon = video.has_scenes_json ? '🟢' : '⚪️';
+  
+  return (
+    <>
+      <p className="video-status">Processado: {statusIcon}</p>
+      {isProcessing ? (
+        <div className="progress-bar">{progressMessage}</div>
+      ) : (
+        <button onClick={handleProcessClick} disabled={isProcessing}>
+          {video.has_scenes_json ? 'Reprocessar' : 'Processar Cenas'}
+        </button>
+      )}
+    </>
+  );
+}
+
+function VideoGrid({ selectedFolder, onProcessingComplete, onVideoSelect, keyToReload }) {
+  const [videos, setVideos] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!selectedFolder) { setVideos([]); return; }
+    const fetchVideos = async () => {
+      try {
+        setLoading(true);
+        const response = await axios.get(`${API_URL}/videos/${selectedFolder}`);
+        setVideos(response.data.videos);
+        setError(null);
+      } catch (err) {
+        setError('Erro ao buscar os vídeos.');
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchVideos();
+  }, [selectedFolder, keyToReload]);
+
+  if (!selectedFolder) return <p className="grid-placeholder">Selecione uma pasta para ver os vídeos.</p>;
+  if (loading) return <p className="grid-placeholder">Carregando vídeos...</p>;
+  if (error) return <p style={{ color: '#ff6b6b' }}>{error}</p>;
+
+  return (
+    <div className="video-grid">
+      {videos.length > 0 ? (
+        videos.map(video => (
+          <VideoCard 
+            key={video.filename} 
+            video={video} 
+            onVideoSelect={onVideoSelect}
+          >
+            <BrowserCardContent video={video} onProcessingComplete={onProcessingComplete} />
+          </VideoCard>
+        ))
+      ) : (
+        <p className="grid-placeholder">Nenhum vídeo encontrado nesta pasta.</p>
+      )}
+    </div>
+  );
+}
+export default VideoGrid;
+
+--------
+
+#.\frontend\src\pages\BrowserPage.jsx
+
+// frontend/src/pages/BrowserPage.jsx
+import React, { useState } from 'react';
+import FolderList from '../components/FolderList';
+import VideoGrid from '../components/VideoGrid';
+
+function BrowserPage({ onVideoSelect, onProcessingComplete, reloadKey }) {
+  const [selectedFolder, setSelectedFolder] = useState(null);
+
+  const handleFolderSelect = (folderName) => {
+    setSelectedFolder(folderName);
+  };
+
+  return (
+    <div className="main-content">
+      <aside className="sidebar">
+        <FolderList onFolderSelect={handleFolderSelect} />
+      </aside>
+      <main className="content">
+        <VideoGrid
+          key={selectedFolder + reloadKey}
+          selectedFolder={selectedFolder}
+          onProcessingComplete={onProcessingComplete}
+          onVideoSelect={onVideoSelect}
+        />
+      </main>
+    </div>
+  );
+}
+
+export default BrowserPage;
 
 --------
 
@@ -1417,6 +1877,85 @@ button:focus-visible {
     text-overflow: ellipsis;
     margin-right: 1rem;
 }
+
+--------
+
+#.\frontend\src\pages\SearchPage.jsx
+
+import React, { useState } from 'react';
+import axios from 'axios';
+import VideoCard from '../components/VideoCard'; // Importa nosso componente reutilizável
+import './SearchPage.css';
+
+const API_URL = 'http://localhost:8000/api';
+
+function SearchPage({ onVideoSelect }) { // Recebe onVideoSelect do App.jsx
+  const [includeTags, setIncludeTags] = useState('');
+  const [excludeTags, setExcludeTags] = useState('');
+  const [minDuration, setMinDuration] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [searched, setSearched] = useState(false);
+
+  const handleSearch = async (e) => {
+    e.preventDefault();
+    setIsLoading(true);
+    setError('');
+    setSearched(true);
+    setSearchResults([]);
+
+    const payload = {
+      include_tags: includeTags.split(',').map(tag => tag.trim()).filter(Boolean),
+      exclude_tags: excludeTags.split(',').map(tag => tag.trim()).filter(Boolean),
+      min_duration: minDuration ? parseFloat(minDuration) : null,
+    };
+
+    try {
+      // O endpoint correto é /search, não /search_videos
+      const response = await axios.post(`${API_URL}/search`, payload);
+      setSearchResults(response.data.results);
+    } catch (err) {
+      setError('A busca falhou. Verifique o console para mais detalhes.');
+      console.error(err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="search-page">
+      <form className="search-form" onSubmit={handleSearch}>
+        <input type="text" placeholder="Incluir tags (ex: 1girl, blue_hair)" value={includeTags} onChange={(e) => setIncludeTags(e.target.value)} />
+        <input type="text" placeholder="Excluir tags (ex: nsfw, solo)" value={excludeTags} onChange={(e) => setExcludeTags(e.target.value)} />
+        <input type="number" step="0.1" min="0" placeholder="Duração Mínima da Cena (s)" value={minDuration} onChange={(e) => setMinDuration(e.target.value)} />
+        <button type="submit" disabled={isLoading}>{isLoading ? 'Buscando...' : 'Buscar'}</button>
+      </form>
+
+      {error && <p className="error-message">{error}</p>}
+      
+      <div className="video-grid">
+        {searchResults.map(video => (
+          <VideoCard 
+            key={video.video_id} 
+            video={video}
+            // [A CORREÇÃO ESTÁ AQUI] Passamos a função onVideoSelect para o VideoCard
+            onVideoSelect={onVideoSelect} 
+          >
+            {/* O conteúdo que vai dentro do card, específico para a página de busca */}
+            <p className="video-status">{video.match_count} cena(s) encontrada(s)</p>
+          </VideoCard>
+        ))}
+      </div>
+
+      {searched && !isLoading && searchResults.length === 0 && (
+        <p className="grid-placeholder">Nenhum vídeo encontrado com esses critérios.</p>
+      )}
+    </div>
+  );
+}
+
+export default SearchPage;
 
 --------
 

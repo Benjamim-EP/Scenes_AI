@@ -87,6 +87,7 @@ def search_videos(request: SearchRequest, db: sqlite3.Connection = Depends(get_d
             path_obj = Path(video['file_path'])
             video['filename'] = path_obj.name
             video['folder'] = path_obj.parent.name
+            video['has_scenes_json'] = True # Se está no resultado da busca, tem cenas.
             
             videos.append(video)
         
