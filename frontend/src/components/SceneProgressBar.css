@@ -12,11 +12,14 @@
 
 .scene-segment {
   height: 100%;
-  transition: filter 0.2s ease-in-out;
+  /* A transição agora é na opacidade, tornando a mudança mais suave */
+  transition: opacity 0.3s ease-in-out, filter 0.2s ease-in-out;
 }
 
 .scene-segment:hover {
+  /* O hover agora sempre ilumina o segmento, seja ele destacado ou não */
   filter: brightness(1.3);
+  opacity: 1; /* Traz o segmento para opacidade total no hover */
 }
 
 .playhead {
@@ -26,8 +29,8 @@
   width: 3px;
   height: 100%;
   background-color: white;
-  transform: translateX(-50%); /* Centraliza o pino */
-  pointer-events: none; /* Garante que o clique passe para a barra abaixo */
+  transform: translateX(-50%);
+  pointer-events: none;
 }
 
 .scene-segment.dimmed {

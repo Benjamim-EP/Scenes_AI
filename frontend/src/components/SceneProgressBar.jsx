@@ -6,9 +6,8 @@ const getColorForScene = (index) => {
   return colors[index % colors.length];
 };
 
-// [CORRIGIDO] Adicionamos um valor padrão para a prop 'highlightedSceneIds'
 function SceneProgressBar({ scenes, duration, currentTime, onSeek, highlightedSceneIds = [] }) {
-  if (!scenes || scenes.length === 0 || duration === 0) {
+  if (!scenes || scenes.length === 0 || duration <= 0) {
     return null;
   }
 
@@ -20,28 +19,29 @@ function SceneProgressBar({ scenes, duration, currentTime, onSeek, highlightedSc
     const clickX = e.clientX - rect.left;
     const width = bar.offsetWidth;
     const seekPercentage = clickX / width;
-    
     onSeek(seekPercentage);
   };
+
+  const isSearchMode = highlightedSceneIds.length > 0;
 
   return (
     <div className="progress-bar-container" onClick={handleBarClick}>
       {scenes.map((scene, index) => {
         const sceneWidth = (scene.duration / duration) * 100;
         
-        // [CORRIGIDO] A lógica de destaque agora funciona de forma segura
-        // Se 'highlightedSceneIds' estiver vazio, 'isHighlighted' será sempre false.
-        const isHighlighted = highlightedSceneIds.length > 0 ? highlightedSceneIds.includes(scene.scene_number || scene.cena_n) : true;
+        // [A CORREÇÃO] Agora comparamos com 'scene.scene_id'
+        const isHighlighted = !isSearchMode || highlightedSceneIds.includes(scene.scene_id);
 
         return (
           <div
-            key={scene.scene_number || scene.cena_n}
-            className={`scene-segment ${isHighlighted ? 'highlighted' : 'dimmed'}`}
+            key={scene.scene_id || scene.cena_n} // Usa scene_id como chave, se disponível
+            className="scene-segment"
             style={{
               width: `${sceneWidth}%`,
-              backgroundColor: isHighlighted ? getColorForScene(index) : '#555',
+              backgroundColor: getColorForScene(index),
+              opacity: isHighlighted ? 1 : 0.3
             }}
-            title={`Cena ${scene.scene_number || scene.cena_n} (${scene.start_time.toFixed(1)}s - ${scene.end_time.toFixed(1)}s)`}
+            title={`Cena ${scene.cena_n} (ID: ${scene.scene_id})`}
           />
         );
       })}
